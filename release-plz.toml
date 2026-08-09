@@ -1,0 +1,11 @@
+# release-plz configuration. Defaults are single-crate-friendly already
+# (no workspace member selection needed); this file exists as the documented
+# override point per the plan (docs/plans/tamga-rust.plan.md §6) rather than
+# to change behavior today.
+[workspace]
+changelog_config = "cliff.toml"
+git_release_enable = true
+
+[[package]]
+name = "tamga"
+changelog_include = []

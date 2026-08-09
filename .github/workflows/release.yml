@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # Opens (or updates) a version-bump + changelog PR driven by Conventional
+  # Commits since the last release. release-plz reads Cargo.toml directly —
+  # no workspace member selection needed for this single-crate repo.
+  release-plz-pr:
+    name: release-plz-pr
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'tamga-sh'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz PR step
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Runs after the release-plz PR above is merged: bumps the version tag and
+  # publishes to crates.io. Auth is crates.io Trusted Publishing (OIDC) via
+  # rust-lang/crates-io-auth-action — no long-lived CARGO_REGISTRY_TOKEN
+  # secret is stored in this repo.
+  release-plz-publish:
+    name: release-plz-publish
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'tamga-sh'
+    permissions:
+      contents: write
+      id-token: write # required for crates.io Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate to crates.io via OIDC
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Run release-plz release step
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

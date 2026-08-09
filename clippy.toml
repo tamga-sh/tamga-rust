@@ -1,0 +1,3 @@
+# Kept in lockstep with `rust-version` in Cargo.toml and the dedicated MSRV job
+# in .github/workflows/ci.yml — do not bump one without the other two.
+msrv = "1.75"

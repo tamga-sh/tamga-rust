@@ -1,0 +1,54 @@
+[package]
+name = "tamga"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Official Rust SDK for Tamga. Integrate license activation, offline verification, and machine management into your Rust applications."
+repository = "https://github.com/tamga-sh/tamga-rust"
+homepage = "https://github.com/tamga-sh/tamga-rust"
+documentation = "https://docs.rs/tamga"
+readme = "README.md"
+keywords = ["licensing", "license", "software-licensing", "keygen", "drm"]
+categories = ["api-bindings", "cryptography", "authentication"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["rustls-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+# Optional synchronous wrapper around the async `Client`, for callers that
+# cannot or do not want to depend on a Tokio runtime directly.
+blocking = []
+
+[dependencies]
+# --- Transport ---
+# `default-features = false` so the `rustls-tls`/`native-tls` crate features above
+# actually select the TLS backend instead of reqwest's own default (native-tls).
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+base64 = "0.22"
+# `v7` only — this SDK/server convention is UUIDv7 everywhere (see tamga-api
+# CLAUDE.md "UUID v7 only"). The `v4` feature is intentionally absent.
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# --- Crypto ---
+ed25519-dalek = "2"
+# RSA-PKCS1v1.5 / RSA-PSS. Deliberately NOT the `rsa` crate — RUSTSEC-2023-0071
+# (Marvin timing attack) is unpatched; `aws-lc-rs` is used instead and the `rsa`
+# crate is banned outright via deny.toml `bans.deny`.
+aws-lc-rs = "1"
+p256 = { version = "0.13", features = ["ecdsa"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+wiremock = "0.6"
+proptest = "1"
+insta = { version = "1", features = ["json"] }

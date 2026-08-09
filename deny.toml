@@ -1,0 +1,28 @@
+# cargo-deny configuration. Run locally with `cargo deny check`; CI runs the
+# same command in .github/workflows/ci.yml. Modeled on tamga-api's deny.toml.
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# RUSTSEC-2023-0071 (Marvin timing attack on RSA PKCS#1 v1.5 decryption) is
+# unpatched in the `rsa` crate. This SDK uses `aws-lc-rs` for all RSA
+# operations instead — see src/crypto/rsa.rs. Do not add `rsa` as a
+# dependency, direct or transitive, without re-litigating this ban.
+deny = [{ name = "rsa" }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

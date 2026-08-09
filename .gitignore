@@ -1,0 +1,15 @@
+/target
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local-only overrides, never committed
+tamga.toml
+.env
+
+# NOTE: Cargo.lock is intentionally NOT ignored. This is a library crate, but
+# a committed lockfile still gives reproducible CI builds; `cargo publish`
+# strips it from the published package automatically.
