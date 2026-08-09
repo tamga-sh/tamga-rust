@@ -55,12 +55,128 @@ pub enum LicenseScheme {
     Unknown,
 }
 
-/// Overage handling for machine/core/memory/disk/process limits. Stub.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+/// Overage handling for machine/core/memory/disk/process limits — how far
+/// over `policy.max_*` a count is still permitted before validation fails
+/// with the corresponding `TooMany*`/`TooMuch*`
+/// [`crate::models::validation::ValidationCode`].
+///
+/// Multiplies the relevant limit before comparing; applies to
+/// machines/cores/memory/disk/processes — **not** to `uses` (server always
+/// enforces strict `count >= max_uses` for uses, regardless of strategy).
+///
+/// Deserializes any unrecognized wire value to [`OverageStrategy::NoOverage`]
+/// rather than erroring — this mirrors the server's own fallback behavior
+/// (`Policy::overage_strategy_parsed()`), which matters because
+/// policy-create currently defaults new policies to the **non-existent**
+/// string `"DENY_ACCESS"`; the server itself silently treats that as
+/// `NoOverage`; an SDK that hard-fails on it would be stricter than the
+/// server it's talking to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverageStrategy {
-    /// Placeholder — replaced by the real 5-variant enum.
-    #[serde(other)]
-    Unknown,
+    /// Enforce the limit strictly — no activations beyond max (`count <=
+    /// max`). Also the fallback for any unrecognized wire value.
+    NoOverage,
+    /// Allow up to 125% of the limit (`count <= max * 1.25`).
+    Allow1_25xOverage,
+    /// Allow up to 150% of the limit (`count <= max * 1.5`).
+    Allow1_5xOverage,
+    /// Allow up to 200% of the limit (`count <= max * 2.0`).
+    Allow2xOverage,
+    /// Skip limit enforcement entirely — always allowed.
+    AlwaysAllowOverage,
+}
+
+impl OverageStrategy {
+    /// Returns whether `count` is permitted under this strategy given a
+    /// `max` limit. Mirrors the server's own `OverageStrategy::allows`
+    /// exactly (including its `f64` multiplication), so a caller
+    /// client-side pre-check reaches the identical verdict.
+    pub fn allows(self, count: i64, max: i64) -> bool {
+        match self {
+            OverageStrategy::NoOverage => count <= max,
+            OverageStrategy::Allow1_25xOverage => (count as f64) <= (max as f64) * 1.25,
+            OverageStrategy::Allow1_5xOverage => (count as f64) <= (max as f64) * 1.5,
+            OverageStrategy::Allow2xOverage => (count as f64) <= (max as f64) * 2.0,
+            OverageStrategy::AlwaysAllowOverage => true,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OverageStrategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "NO_OVERAGE" => OverageStrategy::NoOverage,
+            "ALLOW_1_25X_OVERAGE" => OverageStrategy::Allow1_25xOverage,
+            "ALLOW_1_5X_OVERAGE" => OverageStrategy::Allow1_5xOverage,
+            "ALLOW_2X_OVERAGE" => OverageStrategy::Allow2xOverage,
+            "ALWAYS_ALLOW_OVERAGE" => OverageStrategy::AlwaysAllowOverage,
+            _ => OverageStrategy::NoOverage,
+        })
+    }
+}
+
+#[cfg(test)]
+mod overage_strategy_tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_all_5_known_wire_strings() {
+        let cases = [
+            ("\"NO_OVERAGE\"", OverageStrategy::NoOverage),
+            (
+                "\"ALLOW_1_25X_OVERAGE\"",
+                OverageStrategy::Allow1_25xOverage,
+            ),
+            ("\"ALLOW_1_5X_OVERAGE\"", OverageStrategy::Allow1_5xOverage),
+            ("\"ALLOW_2X_OVERAGE\"", OverageStrategy::Allow2xOverage),
+            (
+                "\"ALWAYS_ALLOW_OVERAGE\"",
+                OverageStrategy::AlwaysAllowOverage,
+            ),
+        ];
+        for (wire, expected) in cases {
+            let parsed: OverageStrategy = serde_json::from_str(wire).unwrap();
+            assert_eq!(parsed, expected, "wire value {wire}");
+        }
+    }
+
+    #[test]
+    fn falls_back_to_no_overage_for_unrecognized_value() {
+        // Reproduces the real "DENY_ACCESS" policy-create-default gotcha.
+        let parsed: OverageStrategy = serde_json::from_str("\"DENY_ACCESS\"").unwrap();
+        assert_eq!(parsed, OverageStrategy::NoOverage);
+    }
+
+    #[test]
+    fn no_overage_blocks_at_max_plus_one() {
+        assert!(!OverageStrategy::NoOverage.allows(11, 10));
+        assert!(OverageStrategy::NoOverage.allows(10, 10));
+    }
+
+    #[test]
+    fn allow_1_25x_permits_within_allowance_and_blocks_excess() {
+        assert!(OverageStrategy::Allow1_25xOverage.allows(12, 10));
+        assert!(!OverageStrategy::Allow1_25xOverage.allows(13, 10));
+    }
+
+    #[test]
+    fn allow_1_5x_permits_within_allowance() {
+        assert!(OverageStrategy::Allow1_5xOverage.allows(15, 10));
+    }
+
+    #[test]
+    fn allow_2x_permits_within_allowance() {
+        assert!(OverageStrategy::Allow2xOverage.allows(20, 10));
+    }
+
+    #[test]
+    fn always_allow_permits_any_count() {
+        assert!(OverageStrategy::AlwaysAllowOverage.allows(9999, 1));
+    }
 }
 
 /// Dead-machine culling behavior. Stub.

@@ -71,16 +71,23 @@ impl ClientConfig {
     }
 
     /// `https://<host>/v1/accounts/{account_id}`, with the configured
-    /// `host`'s scheme (if any) and trailing slash (if any) normalized away
-    /// first, so callers can pass a bare host, a host with a trailing
-    /// slash, or a full `https://` URL interchangeably.
+    /// `host`'s trailing slash (if any) normalized away first, so callers
+    /// can pass a bare host, a host with a trailing slash, or a full
+    /// `https://` URL interchangeably.
+    ///
+    /// An explicit `http://` scheme is preserved rather than upgraded — the
+    /// production API is always HTTPS, but this keeps `ClientConfig`
+    /// usable against a local mock server (`wiremock`, integration tests)
+    /// or a self-hosted plain-HTTP deployment without a separate
+    /// test-only code path.
     pub fn base_url(&self) -> String {
-        let host = self
-            .host
-            .trim_end_matches('/')
-            .trim_start_matches("https://")
-            .trim_start_matches("http://");
-        format!("https://{host}/v1/accounts/{}", self.account_id)
+        let trimmed = self.host.trim_end_matches('/');
+        if let Some(host) = trimmed.strip_prefix("http://") {
+            format!("http://{host}/v1/accounts/{}", self.account_id)
+        } else {
+            let host = trimmed.strip_prefix("https://").unwrap_or(trimmed);
+            format!("https://{host}/v1/accounts/{}", self.account_id)
+        }
     }
 }
 
@@ -143,12 +150,7 @@ impl ClientConfigBuilder {
 /// proof) lives here, per plan §2. Endpoint methods land in Sections C–K.
 #[derive(Debug, Clone)]
 pub struct Client {
-    // Not read yet — first consumer lands with Section C's endpoint methods
-    // (`validate_by_key` etc.), which issue requests through `http` using
-    // `config`'s base URL/auth/version.
-    #[allow(dead_code)]
     pub(crate) http: reqwest::Client,
-    #[allow(dead_code)]
     pub(crate) config: ClientConfig,
 }
 
@@ -163,6 +165,190 @@ impl Client {
             .build()
             .map_err(crate::TamgaError::Http)?;
         Ok(Client { http, config })
+    }
+
+    /// Builds a request against `{base_url}{path}`, applying the configured
+    /// auth transport, `Tamga-Version` (sanitized), and `Tamga-OTP` (if
+    /// `otp` is set) — the common request setup shared by every endpoint
+    /// method.
+    fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        otp: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let url = format!("{}{path}", self.config.base_url());
+        let mut builder = self.http.request(method, url);
+        if let Some((name, value)) = self.config.auth.header() {
+            builder = builder.header(name, value);
+        }
+        if let Some((name, value)) = self.config.auth.query_param() {
+            builder = builder.query(&[(name, value)]);
+        }
+        builder = builder.header(
+            "Tamga-Version",
+            crate::transport::sanitize_version(&self.config.api_version),
+        );
+        if let Some(otp) = otp {
+            builder = builder.header("Tamga-OTP", otp);
+        }
+        builder
+    }
+
+    /// Sends a JSON:API request (`Content-Type: application/vnd.api+json`,
+    /// optional JSON body) and deserializes a `{ data: T, meta: M }`
+    /// envelope on success, or a [`crate::TamgaError::Api`] on a non-2xx
+    /// status. Used by the validate endpoints, whose `ValidationMeta` lives
+    /// in `meta`, not `data`. A plain `{ data: T }`-only variant (no meta)
+    /// lands with the first endpoint that needs one (Section D).
+    async fn send_json_api_with_meta<T, M>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        otp: Option<&str>,
+    ) -> Result<(T, M), crate::TamgaError>
+    where
+        T: serde::de::DeserializeOwned,
+        M: serde::de::DeserializeOwned,
+    {
+        #[derive(serde::Deserialize)]
+        struct EnvelopeWithMeta<T, M> {
+            data: T,
+            meta: M,
+        }
+
+        let mut builder = self
+            .request(method, path, otp)
+            .header(reqwest::header::CONTENT_TYPE, "application/vnd.api+json");
+        if let Some(body) = body {
+            builder = builder.json(&body);
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: EnvelopeWithMeta<T, M> = response.json().await?;
+        Ok((envelope.data, envelope.meta))
+    }
+
+    /// Sends a request expecting a flat (non-enveloped) JSON body — used
+    /// only by quick-validate today, which returns plain
+    /// `application/json` with no `data` key.
+    async fn send_flat<T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        otp: Option<&str>,
+    ) -> Result<T, crate::TamgaError> {
+        let response = self.request(method, path, otp).send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// Parses a non-2xx response body as a JSON:API error document and
+    /// returns its first error wrapped in [`crate::TamgaError::Api`]. Falls
+    /// back to a synthetic error (status only, no server-provided detail)
+    /// if the body isn't valid JSON:API error JSON — a non-JSON error page
+    /// (e.g. from a proxy in front of the API) must not panic or silently
+    /// swallow the failure.
+    async fn api_error(response: reqwest::Response) -> crate::TamgaError {
+        let status = response.status();
+        match response.json::<crate::error::JsonApiErrorDocument>().await {
+            Ok(doc) => match doc.errors.into_iter().next() {
+                Some(err) => crate::TamgaError::Api(Box::new(err)),
+                None => crate::TamgaError::Api(Box::new(crate::error::JsonApiError {
+                    id: String::new(),
+                    status: status.as_u16().to_string(),
+                    code: "UNKNOWN".to_string(),
+                    title: "Unknown Error".to_string(),
+                    detail: "server returned an empty errors array".to_string(),
+                    source: None,
+                })),
+            },
+            Err(_) => crate::TamgaError::Api(Box::new(crate::error::JsonApiError {
+                id: String::new(),
+                status: status.as_u16().to_string(),
+                code: "UNKNOWN".to_string(),
+                title: "Unknown Error".to_string(),
+                detail: format!("server returned {status} with a non-JSON:API body"),
+                source: None,
+            })),
+        }
+    }
+
+    /// `POST /licenses/actions/validate-key` — validates a license by its
+    /// raw key. No scope support on this endpoint (use
+    /// [`Self::validate_by_id`] for scoped validation). `otp` sends
+    /// `Tamga-OTP` if the bearer's account has 2FA enabled.
+    pub async fn validate_by_key(
+        &self,
+        key: &str,
+        otp: Option<&str>,
+    ) -> Result<crate::models::validation::ValidationResult, crate::TamgaError> {
+        let body = serde_json::json!({ "key": key });
+        let (license, meta) = self
+            .send_json_api_with_meta(
+                reqwest::Method::POST,
+                "/licenses/actions/validate-key",
+                Some(body),
+                otp,
+            )
+            .await?;
+        Ok(crate::models::validation::ValidationResult { license, meta })
+    }
+
+    /// `POST /licenses/{license_id}/actions/validate` — validates a license
+    /// by ID, optionally constrained by `scope` (see
+    /// [`crate::models::validation::ScopeObject`] — only
+    /// `product`/`policy`/`user`/`environment` are enforced server-side
+    /// today). `skip_touch: true` suppresses the `last_validated_at`
+    /// side-effect. `otp` sends `Tamga-OTP` if the bearer's account has 2FA
+    /// enabled.
+    pub async fn validate_by_id(
+        &self,
+        license_id: uuid::Uuid,
+        scope: Option<crate::models::validation::ScopeObject>,
+        skip_touch: bool,
+        otp: Option<&str>,
+    ) -> Result<crate::models::validation::ValidationResult, crate::TamgaError> {
+        let mut meta = serde_json::json!({ "skip_touch": skip_touch });
+        if let Some(scope) = scope {
+            meta["scope"] = serde_json::to_value(scope)?;
+        }
+        let body = serde_json::json!({ "meta": meta });
+        let (license, validation_meta) = self
+            .send_json_api_with_meta(
+                reqwest::Method::POST,
+                &format!("/licenses/{license_id}/actions/validate"),
+                Some(body),
+                otp,
+            )
+            .await?;
+        Ok(crate::models::validation::ValidationResult {
+            license,
+            meta: validation_meta,
+        })
+    }
+
+    /// `GET /licenses/{license_id}/actions/validate` — quick-validate.
+    /// Returns only the flat `{ ts, valid, detail, code }` body (no license
+    /// resource) — cheaper than [`Self::validate_by_id`] when the caller
+    /// only needs the outcome, not the license's current attributes. `otp`
+    /// sends `Tamga-OTP` if the bearer's account has 2FA enabled.
+    pub async fn quick_validate(
+        &self,
+        license_id: uuid::Uuid,
+        otp: Option<&str>,
+    ) -> Result<crate::models::validation::ValidationMeta, crate::TamgaError> {
+        self.send_flat(
+            reqwest::Method::GET,
+            &format!("/licenses/{license_id}/actions/validate"),
+            otp,
+        )
+        .await
     }
 }
 
@@ -237,6 +423,17 @@ mod tests {
         assert_eq!(
             config.base_url(),
             "https://api.tamga.sh/v1/accounts/acc-123"
+        );
+    }
+
+    #[test]
+    fn base_url_preserves_explicit_http_scheme_for_local_testing() {
+        let config = ClientConfig::builder("acc-123", "http://127.0.0.1:8080")
+            .auth(AuthTransport::License("lic-abc".to_string()))
+            .build();
+        assert_eq!(
+            config.base_url(),
+            "http://127.0.0.1:8080/v1/accounts/acc-123"
         );
     }
 

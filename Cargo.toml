@@ -32,6 +32,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 base64 = "0.22"
+# Wire timestamps (`created`, `updated`, `expiry`, `ts`, ...) are RFC 3339 via
+# `chrono::DateTime<Utc>`, matching `tamga-api`'s own serializers exactly.
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 # `v7` only — this SDK/server convention is UUIDv7 everywhere (see tamga-api
 # CLAUDE.md "UUID v7 only"). The `v4` feature is intentionally absent.
 uuid = { version = "1", features = ["v7", "serde"] }
