@@ -196,11 +196,38 @@ impl Client {
     }
 
     /// Sends a JSON:API request (`Content-Type: application/vnd.api+json`,
-    /// optional JSON body) and deserializes a `{ data: T, meta: M }`
-    /// envelope on success, or a [`crate::TamgaError::Api`] on a non-2xx
-    /// status. Used by the validate endpoints, whose `ValidationMeta` lives
-    /// in `meta`, not `data`. A plain `{ data: T }`-only variant (no meta)
-    /// lands with the first endpoint that needs one (Section D).
+    /// optional JSON body) and deserializes a `{ data: T }` envelope on
+    /// success, or a typed [`crate::TamgaError`] (see
+    /// [`crate::TamgaError::from_json_api_error`]) on a non-2xx status.
+    async fn send_json_api<T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        otp: Option<&str>,
+    ) -> Result<T, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope<T> {
+            data: T,
+        }
+
+        let mut builder = self
+            .request(method, path, otp)
+            .header(reqwest::header::CONTENT_TYPE, "application/vnd.api+json");
+        if let Some(body) = body {
+            builder = builder.json(&body);
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope<T> = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// Like [`Self::send_json_api`] but also returns the parsed `meta`
+    /// field alongside `data` — used by the validate endpoints, whose
+    /// `ValidationMeta` lives in `meta`, not `data`.
     async fn send_json_api_with_meta<T, M>(
         &self,
         method: reqwest::Method,
@@ -249,34 +276,38 @@ impl Client {
     }
 
     /// Parses a non-2xx response body as a JSON:API error document and
-    /// returns its first error wrapped in [`crate::TamgaError::Api`]. Falls
-    /// back to a synthetic error (status only, no server-provided detail)
-    /// if the body isn't valid JSON:API error JSON — a non-JSON error page
-    /// (e.g. from a proxy in front of the API) must not panic or silently
+    /// maps its first error to the most specific [`crate::TamgaError`]
+    /// variant via [`crate::TamgaError::from_json_api_error`]. Falls back to
+    /// a synthetic error (status only, no server-provided detail) if the
+    /// body isn't valid JSON:API error JSON — a non-JSON error page (e.g.
+    /// from a proxy in front of the API) must not panic or silently
     /// swallow the failure.
     async fn api_error(response: reqwest::Response) -> crate::TamgaError {
         let status = response.status();
-        match response.json::<crate::error::JsonApiErrorDocument>().await {
-            Ok(doc) => match doc.errors.into_iter().next() {
-                Some(err) => crate::TamgaError::Api(Box::new(err)),
-                None => crate::TamgaError::Api(Box::new(crate::error::JsonApiError {
-                    id: String::new(),
-                    status: status.as_u16().to_string(),
-                    code: "UNKNOWN".to_string(),
-                    title: "Unknown Error".to_string(),
-                    detail: "server returned an empty errors array".to_string(),
-                    source: None,
-                })),
-            },
-            Err(_) => crate::TamgaError::Api(Box::new(crate::error::JsonApiError {
+        let json_api_error = match response.json::<crate::error::JsonApiErrorDocument>().await {
+            Ok(doc) => {
+                doc.errors
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| crate::error::JsonApiError {
+                        id: String::new(),
+                        status: status.as_u16().to_string(),
+                        code: "UNKNOWN".to_string(),
+                        title: "Unknown Error".to_string(),
+                        detail: "server returned an empty errors array".to_string(),
+                        source: None,
+                    })
+            }
+            Err(_) => crate::error::JsonApiError {
                 id: String::new(),
                 status: status.as_u16().to_string(),
                 code: "UNKNOWN".to_string(),
                 title: "Unknown Error".to_string(),
                 detail: format!("server returned {status} with a non-JSON:API body"),
                 source: None,
-            })),
-        }
+            },
+        };
+        crate::TamgaError::from_json_api_error(json_api_error)
     }
 
     /// `POST /licenses/actions/validate-key` — validates a license by its
@@ -347,6 +378,28 @@ impl Client {
             reqwest::Method::GET,
             &format!("/licenses/{license_id}/actions/validate"),
             otp,
+        )
+        .await
+    }
+
+    /// `POST /licenses/{license_id}/actions/check-in` — no body. Returns
+    /// the updated license resource with `last_check_in_at` bumped (no
+    /// `meta` on this response, unlike validate).
+    ///
+    /// Fails with [`crate::TamgaError::CheckInNotRequired`] if the
+    /// license's policy has `require_check_in: false` — callers should
+    /// check that flag on the license's policy before scheduling periodic
+    /// check-ins, rather than reacting to this error with retry logic; it
+    /// is a caller error, not a transient failure.
+    pub async fn check_in(
+        &self,
+        license_id: uuid::Uuid,
+    ) -> Result<crate::models::license::LicenseResource, crate::TamgaError> {
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/licenses/{license_id}/actions/check-in"),
+            None,
+            None,
         )
         .await
     }

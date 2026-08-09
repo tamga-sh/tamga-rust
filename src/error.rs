@@ -41,12 +41,34 @@ pub enum TamgaError {
     /// Response body could not be parsed as the expected JSON shape.
     #[error("failed to parse response body: {0}")]
     Json(#[from] serde_json::Error),
-    /// Server returned a non-2xx status with a JSON:API error body. Boxed —
+    /// Server returned a non-2xx status with a JSON:API error body whose
+    /// `code` doesn't have a more specific typed variant below. Boxed —
     /// `JsonApiError` carries several owned `String`s, and clippy's
     /// `result_large_err` flags an unboxed variant here as bloating every
     /// `Result<T, TamgaError>` return slot across the crate.
     #[error("API error {code}: {detail}", code = .0.code, detail = .0.detail)]
     Api(Box<JsonApiError>),
+    /// `422 CHECK_IN_NOT_REQUIRED` — a **caller error**, not something to
+    /// retry. Callers should check `require_check_in` on the license's
+    /// policy before scheduling periodic check-ins, rather than reacting to
+    /// this error with retry logic.
+    #[error("check-in not required: {detail}", detail = .0.detail)]
+    CheckInNotRequired(Box<JsonApiError>),
+}
+
+impl TamgaError {
+    /// Maps a parsed [`JsonApiError`] to its most specific [`TamgaError`]
+    /// variant, falling back to the generic [`TamgaError::Api`] for any
+    /// `code` without a dedicated variant. Single dispatch point extended
+    /// as later sections (K, and E/F/H's per-endpoint codes) add more typed
+    /// variants — new codes only need a match arm here, not a new call site
+    /// at every endpoint method.
+    pub(crate) fn from_json_api_error(err: JsonApiError) -> Self {
+        match err.code.as_str() {
+            "CHECK_IN_NOT_REQUIRED" => TamgaError::CheckInNotRequired(Box::new(err)),
+            _ => TamgaError::Api(Box::new(err)),
+        }
+    }
 }
 
 /// A single JSON:API error object, matching `tamga-api`'s
@@ -111,6 +133,34 @@ mod tests {
         assert_eq!(doc.errors.len(), 1);
         assert_eq!(doc.errors[0].code, "NOT_FOUND");
         assert_eq!(doc.errors[0].status, "404");
+    }
+
+    #[test]
+    fn maps_check_in_not_required_code_to_typed_variant() {
+        let err = JsonApiError {
+            id: "01926b3e-0000-7000-8000-000000000000".to_string(),
+            status: "422".to_string(),
+            code: "CHECK_IN_NOT_REQUIRED".to_string(),
+            title: "Unprocessable Entity".to_string(),
+            detail: "this license's policy does not require check-in".to_string(),
+            source: None,
+        };
+        let mapped = TamgaError::from_json_api_error(err);
+        assert!(matches!(mapped, TamgaError::CheckInNotRequired(_)));
+    }
+
+    #[test]
+    fn unrecognized_code_maps_to_generic_api_variant() {
+        let err = JsonApiError {
+            id: "01926b3e-0000-7000-8000-000000000000".to_string(),
+            status: "404".to_string(),
+            code: "NOT_FOUND".to_string(),
+            title: "Not Found".to_string(),
+            detail: "not found".to_string(),
+            source: None,
+        };
+        let mapped = TamgaError::from_json_api_error(err);
+        assert!(matches!(mapped, TamgaError::Api(_)));
     }
 
     #[test]
