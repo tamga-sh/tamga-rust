@@ -773,6 +773,76 @@ impl Client {
         )
         .await
     }
+
+    /// `GET /licenses/{license_id}/entitlements` — keyset-paginated
+    /// (`limit`, `page[after]`). Despite the URL nesting, returns full
+    /// [`crate::models::entitlement::EntitlementResource`]s, not
+    /// lightweight junction records. No auth/permission check is applied
+    /// beyond the license existing.
+    pub async fn list_entitlements(
+        &self,
+        license_id: uuid::Uuid,
+        limit: Option<u32>,
+        after: Option<uuid::Uuid>,
+    ) -> Result<Vec<crate::models::entitlement::EntitlementResource>, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            data: Vec<crate::models::entitlement::EntitlementResource>,
+        }
+
+        let mut builder = self.request(
+            reqwest::Method::GET,
+            &format!("/licenses/{license_id}/entitlements"),
+            None,
+        );
+        if let Some(limit) = limit {
+            builder = builder.query(&[("limit", limit.to_string())]);
+        }
+        if let Some(after) = after {
+            builder = builder.query(&[("page[after]", after.to_string())]);
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// `GET /licenses/{license_id}/entitlements/{entitlement_id}`.
+    pub async fn get_entitlement(
+        &self,
+        license_id: uuid::Uuid,
+        entitlement_id: uuid::Uuid,
+    ) -> Result<crate::models::entitlement::EntitlementResource, crate::TamgaError> {
+        self.send_json_api(
+            reqwest::Method::GET,
+            &format!("/licenses/{license_id}/entitlements/{entitlement_id}"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Convenience helper: fetches this license's entitlements (a single
+    /// page, up to `limit`) and checks whether any has the given `code`.
+    ///
+    /// Matches on `code` (the stable, developer-facing identifier) —
+    /// **never** on `name` (just a display label). Fetches at most one
+    /// page (`limit`, default 100 — the server's own max page size); for
+    /// licenses with more entitlements than fit on one page, paginate via
+    /// [`Self::list_entitlements`] directly instead.
+    pub async fn has_entitlement(
+        &self,
+        license_id: uuid::Uuid,
+        code: &str,
+        limit: Option<u32>,
+    ) -> Result<bool, crate::TamgaError> {
+        let entitlements = self
+            .list_entitlements(license_id, Some(limit.unwrap_or(100)), None)
+            .await?;
+        Ok(entitlements.iter().any(|e| e.attributes.code == code))
+    }
 }
 
 /// Optional attributes for [`Client::create_machine`]/
