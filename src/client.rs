@@ -673,6 +673,106 @@ impl Client {
             .await?;
         Ok((machine, meta.proof))
     }
+
+    /// `POST /components` — registers a component against `machine_id`.
+    /// **Not** JSON:API-enveloped on the request side (unlike
+    /// `create_machine`) — the server's `create_component` handler expects
+    /// a flat `{ machine_id, fingerprint, name, metadata }` body; this is a
+    /// real asymmetry in `tamga-api`, not an SDK oversight.
+    ///
+    /// Unique per `(account_id, machine_id, fingerprint)` — a duplicate
+    /// fails with [`crate::TamgaError::FingerprintTaken`].
+    pub async fn create_component(
+        &self,
+        machine_id: uuid::Uuid,
+        fingerprint: &str,
+        name: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<crate::models::machine::ComponentResource, crate::TamgaError> {
+        let body = serde_json::json!({
+            "machine_id": machine_id,
+            "fingerprint": fingerprint,
+            "name": name,
+            "metadata": metadata.unwrap_or_else(|| serde_json::json!({})),
+        });
+        self.send_json_api(reqwest::Method::POST, "/components", Some(body), None)
+            .await
+    }
+
+    /// `GET /machines/{machine_id}/components` — keyset-paginated
+    /// (`limit`, `page[after]`). The response carries no cursor
+    /// metadata/links — pass the last returned component's `id` as `after`
+    /// to fetch the next page.
+    pub async fn list_components(
+        &self,
+        machine_id: uuid::Uuid,
+        limit: Option<u32>,
+        after: Option<uuid::Uuid>,
+    ) -> Result<Vec<crate::models::machine::ComponentResource>, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            data: Vec<crate::models::machine::ComponentResource>,
+        }
+
+        let mut builder = self.request(
+            reqwest::Method::GET,
+            &format!("/machines/{machine_id}/components"),
+            None,
+        );
+        if let Some(limit) = limit {
+            builder = builder.query(&[("limit", limit.to_string())]);
+        }
+        if let Some(after) = after {
+            builder = builder.query(&[("page[after]", after.to_string())]);
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// `POST /processes` — registers a process against `machine_id`. Same
+    /// flat (non-JSON:API) request body shape as [`Self::create_component`]
+    /// — see that method's doc comment.
+    ///
+    /// Unique PID per machine — a duplicate fails with
+    /// [`crate::TamgaError::PidTaken`]. Unlike a machine (which starts
+    /// `NOT_STARTED`), a process starts `ALIVE` immediately — its
+    /// `last_heartbeat_at` is set at creation, not left unset until a first
+    /// ping.
+    pub async fn create_process(
+        &self,
+        machine_id: uuid::Uuid,
+        pid: impl Into<crate::models::machine::Pid>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<crate::models::machine::ProcessResource, crate::TamgaError> {
+        let body = serde_json::json!({
+            "machine_id": machine_id,
+            "pid": pid.into(),
+            "metadata": metadata.unwrap_or_else(|| serde_json::json!({})),
+        });
+        self.send_json_api(reqwest::Method::POST, "/processes", Some(body), None)
+            .await
+    }
+
+    /// `POST /processes/{process_id}/actions/ping` — no body. ⚠️ The
+    /// process heartbeat window is a **hardcoded 30 seconds** with no
+    /// resurrection grace period — see [`crate::models::machine::Pid`]'s
+    /// doc comment.
+    pub async fn ping_process(
+        &self,
+        process_id: uuid::Uuid,
+    ) -> Result<crate::models::machine::ProcessResource, crate::TamgaError> {
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/processes/{process_id}/actions/ping"),
+            None,
+            None,
+        )
+        .await
+    }
 }
 
 /// Optional attributes for [`Client::create_machine`]/

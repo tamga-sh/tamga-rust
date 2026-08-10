@@ -133,20 +133,152 @@ mod heartbeat_status_tests {
     }
 }
 
-/// The `components` JSON:API resource. Stub.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+/// The `components` JSON:API resource: `{ id, type, attributes }`. Field
+/// set matches `tamga-api`'s actual `ComponentResource`/`ComponentAttributes`
+/// serializer — no `relationships` object, same pattern as the other
+/// resources in this crate.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ComponentResource {
-    _private: (),
+    /// UUIDv7 component ID.
+    pub id: uuid::Uuid,
+    /// Always `"components"`.
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    /// The resource's attribute bag.
+    pub attributes: ComponentAttributes,
 }
 
-/// The `processes` JSON:API resource. Stub.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+/// Attributes of a [`ComponentResource`].
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ComponentAttributes {
+    /// Unique per `(account_id, machine_id, fingerprint)`.
+    pub fingerprint: String,
+    /// Display name.
+    pub name: String,
+    /// The owning machine's ID.
+    pub machine_id: uuid::Uuid,
+    /// Arbitrary caller-set metadata.
+    pub metadata: serde_json::Value,
+    /// Creation timestamp.
+    pub created: chrono::DateTime<chrono::Utc>,
+    /// Last-updated timestamp.
+    pub updated: chrono::DateTime<chrono::Utc>,
+}
+
+/// The `processes` JSON:API resource: `{ id, type, attributes }`. Field set
+/// matches `tamga-api`'s actual `ProcessResource`/`ProcessAttributes`
+/// serializer.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProcessResource {
-    _private: (),
+    /// UUIDv7 process ID.
+    pub id: uuid::Uuid,
+    /// Always `"processes"`.
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    /// The resource's attribute bag.
+    pub attributes: ProcessAttributes,
+}
+
+/// Attributes of a [`ProcessResource`]. Unlike a [`MachineResource`], there
+/// is no `heartbeat_status` field — a process's aliveness is entirely a
+/// function of `last_heartbeat_at` versus the hardcoded 30s window (see
+/// [`Pid`]'s doc comment); a dead process row is deleted immediately, not
+/// tracked in a `DEAD`/`RESURRECTED` state like machines.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProcessAttributes {
+    /// The process ID, as a wire string — see [`Pid`].
+    pub pid: String,
+    /// The owning machine's ID.
+    pub machine_id: uuid::Uuid,
+    /// A process starts `ALIVE` immediately at creation (unlike a machine,
+    /// which starts `NOT_STARTED`) — this timestamp is set on creation, not
+    /// left `None` until a first ping.
+    pub last_heartbeat_at: chrono::DateTime<chrono::Utc>,
+    /// Arbitrary caller-set metadata.
+    pub metadata: serde_json::Value,
+    /// Creation timestamp.
+    pub created: chrono::DateTime<chrono::Utc>,
+    /// Last-updated timestamp.
+    pub updated: chrono::DateTime<chrono::Utc>,
 }
 
 /// Process ID newtype. The wire format is a JSON **string**, not a number —
-/// this type exists so callers can pass a native `u32`/`i32` and have it
-/// stringify correctly on serialize. Stub.
+/// this type exists so callers holding a native numeric PID don't have to
+/// hand-format it; `From<u32>`/`From<i32>` stringify on construction.
+///
+/// ⚠️ Process heartbeat window is a **hardcoded 30 seconds** — much shorter
+/// than a machine's 600s — with **no resurrection grace period**: a dead
+/// process row is deleted immediately, no `KEEP_DEAD` equivalent. An SDK
+/// monitoring a long-running process must ping at least every ~10s to stay
+/// safely inside this window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pid(pub(crate) String);
+
+impl Pid {
+    /// Borrows the wire string form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<u32> for Pid {
+    fn from(pid: u32) -> Self {
+        Pid(pid.to_string())
+    }
+}
+
+impl From<i32> for Pid {
+    fn from(pid: i32) -> Self {
+        Pid(pid.to_string())
+    }
+}
+
+impl From<String> for Pid {
+    fn from(pid: String) -> Self {
+        Pid(pid)
+    }
+}
+
+impl serde::Serialize for Pid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Pid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Pid)
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::*;
+
+    #[test]
+    fn from_u32_stringifies() {
+        let pid: Pid = 1234u32.into();
+        assert_eq!(pid.as_str(), "1234");
+    }
+
+    #[test]
+    fn from_i32_stringifies() {
+        let pid: Pid = 1234i32.into();
+        assert_eq!(pid.as_str(), "1234");
+    }
+
+    #[test]
+    fn round_trips_through_serde_as_a_json_string() {
+        let pid: Pid = 1234u32.into();
+        let json = serde_json::to_string(&pid).unwrap();
+        assert_eq!(json, "\"1234\"");
+        let parsed: Pid = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, pid);
+    }
+}

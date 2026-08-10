@@ -89,6 +89,10 @@ pub enum TamgaError {
     /// rejected).
     #[error("dataset invalid: {detail}", detail = .0.detail)]
     DatasetInvalid(Box<JsonApiError>),
+    /// `409 PID_TAKEN` — a process with this PID already exists on this
+    /// machine.
+    #[error("pid taken: {detail}", detail = .0.detail)]
+    PidTaken(Box<JsonApiError>),
     /// A `"v1x0."` offline proof failed to parse or verify — see
     /// [`ProofError`].
     #[error(transparent)]
@@ -195,6 +199,7 @@ impl TamgaError {
             "LICENSE_NOT_ENCRYPTED" => TamgaError::LicenseNotEncrypted(Box::new(err)),
             "LICENSE_KEY_MISSING" => TamgaError::LicenseKeyMissingApi(Box::new(err)),
             "FINGERPRINT_TAKEN" => TamgaError::FingerprintTaken(Box::new(err)),
+            "PID_TAKEN" => TamgaError::PidTaken(Box::new(err)),
             "DATASET_INVALID" => TamgaError::DatasetInvalid(Box::new(err)),
             "TTL_INVALID" => TamgaError::TtlInvalidApi(Box::new(err)),
             "SCHEME_NOT_SUPPORTED" => TamgaError::SchemeNotSupportedApi(Box::new(err)),
