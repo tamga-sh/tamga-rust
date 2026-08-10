@@ -35,10 +35,7 @@ pub struct MachineResource {
 }
 
 /// Attributes of a [`MachineResource`], matching `tamga-api`'s
-/// `MachineAttributes` field-for-field. `heartbeat_status` is left as a
-/// plain `String` here rather than the typed [`HeartbeatStatus`] enum —
-/// Section G wires that conversion up alongside the machine-management
-/// endpoints that actually consume heartbeat state.
+/// `MachineAttributes` field-for-field.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MachineAttributes {
     /// Unique per `(account_id, license_id, fingerprint)`.
@@ -57,8 +54,8 @@ pub struct MachineAttributes {
     pub platform: Option<String>,
     /// Optional display name.
     pub name: Option<String>,
-    /// Wire string, e.g. `"NOT_STARTED"`/`"ALIVE"`/`"DEAD"`/`"RESURRECTED"`.
-    pub heartbeat_status: String,
+    /// Machine heartbeat state — see [`HeartbeatStatus`].
+    pub heartbeat_status: HeartbeatStatus,
     /// Timestamp of the last `ping-heartbeat` call.
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Server-computed next-expected-heartbeat deadline, if derivable.
@@ -73,13 +70,67 @@ pub struct MachineAttributes {
     pub updated: chrono::DateTime<chrono::Utc>,
 }
 
-/// Machine heartbeat state machine. Stub.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+/// Machine heartbeat state machine: `NotStarted` → `Alive` → `Dead` →
+/// `Resurrected`. The window is a **hardcoded 600s (10 min)**, not driven
+/// by `policy.heartbeat_duration`. Treat `Dead` as "machine likely deleted
+/// server-side — re-activate rather than retry ping," per
+/// `docs/plans/tamga-rust.plan.md` §G.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatStatus {
-    /// Placeholder — replaced by the real 4-variant enum
-    /// (`NOT_STARTED`/`ALIVE`/`DEAD`/`RESURRECTED`).
-    #[serde(other)]
-    Unknown,
+    /// Never pinged.
+    NotStarted,
+    /// Pinged within the 600s window.
+    Alive,
+    /// Window elapsed since the last ping.
+    Dead,
+    /// Was `Dead`, but a new ping arrived within the policy's resurrection
+    /// grace period — see
+    /// [`crate::models::policy::HeartbeatResurrectionStrategy`].
+    Resurrected,
+    /// Any wire value not matching a known variant — lenient
+    /// deserialization for forward-compatibility.
+    Unknown(String),
+}
+
+impl<'de> serde::Deserialize<'de> for HeartbeatStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "NOT_STARTED" => HeartbeatStatus::NotStarted,
+            "ALIVE" => HeartbeatStatus::Alive,
+            "DEAD" => HeartbeatStatus::Dead,
+            "RESURRECTED" => HeartbeatStatus::Resurrected,
+            other => HeartbeatStatus::Unknown(other.to_string()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_status_tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_all_4_known_wire_strings() {
+        let cases = [
+            ("\"NOT_STARTED\"", HeartbeatStatus::NotStarted),
+            ("\"ALIVE\"", HeartbeatStatus::Alive),
+            ("\"DEAD\"", HeartbeatStatus::Dead),
+            ("\"RESURRECTED\"", HeartbeatStatus::Resurrected),
+        ];
+        for (wire, expected) in cases {
+            let parsed: HeartbeatStatus = serde_json::from_str(wire).unwrap();
+            assert_eq!(parsed, expected, "wire value {wire}");
+        }
+    }
+
+    #[test]
+    fn deserializes_unknown_value_to_unknown_variant() {
+        let parsed: HeartbeatStatus = serde_json::from_str("\"FUTURE_STATE\"").unwrap();
+        assert_eq!(parsed, HeartbeatStatus::Unknown("FUTURE_STATE".to_string()));
+    }
 }
 
 /// The `components` JSON:API resource. Stub.

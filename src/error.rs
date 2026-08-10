@@ -80,6 +80,10 @@ pub enum TamgaError {
     /// because the license's scheme is `RSA_2048_JWT_RS256`.
     #[error("scheme not supported: {detail}", detail = .0.detail)]
     SchemeNotSupportedApi(Box<JsonApiError>),
+    /// `409 FINGERPRINT_TAKEN` — a machine (or component) with this
+    /// fingerprint already exists on this license.
+    #[error("fingerprint taken: {detail}", detail = .0.detail)]
+    FingerprintTaken(Box<JsonApiError>),
 }
 
 /// Cryptographic primitive failures — signature verification, decryption,
@@ -165,6 +169,7 @@ impl TamgaError {
             "CHECK_IN_NOT_REQUIRED" => TamgaError::CheckInNotRequired(Box::new(err)),
             "LICENSE_NOT_ENCRYPTED" => TamgaError::LicenseNotEncrypted(Box::new(err)),
             "LICENSE_KEY_MISSING" => TamgaError::LicenseKeyMissingApi(Box::new(err)),
+            "FINGERPRINT_TAKEN" => TamgaError::FingerprintTaken(Box::new(err)),
             "TTL_INVALID" => TamgaError::TtlInvalidApi(Box::new(err)),
             "SCHEME_NOT_SUPPORTED" => TamgaError::SchemeNotSupportedApi(Box::new(err)),
             _ => TamgaError::Api(Box::new(err)),

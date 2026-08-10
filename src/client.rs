@@ -516,6 +516,170 @@ impl Client {
         )
         .await
     }
+
+    /// `POST /machines` — registers a machine against `license_id`.
+    ///
+    /// Unique per `(account_id, license_id, fingerprint)` — a duplicate
+    /// fingerprint on the same license fails with
+    /// [`crate::TamgaError::FingerprintTaken`].
+    ///
+    /// **No machine/core/etc. limit is checked at creation time** — those
+    /// limits only surface later via [`Self::validate_by_id`]. The
+    /// recommended "activate machine" flow is create → validate → interpret
+    /// `TooManyMachines`/`TooManyCores`/etc., deleting the machine row on
+    /// that path if the desired UX is "reject over-limit activation" — see
+    /// [`Self::activate_machine`], which does exactly that.
+    pub async fn create_machine(
+        &self,
+        license_id: uuid::Uuid,
+        fingerprint: &str,
+        opts: CreateMachineOptions,
+    ) -> Result<crate::models::machine::MachineResource, crate::TamgaError> {
+        let body = serde_json::json!({
+            "data": {
+                "type": "machines",
+                "attributes": {
+                    "fingerprint": fingerprint,
+                    "name": opts.name,
+                    "ip": opts.ip,
+                    "hostname": opts.hostname,
+                    "platform": opts.platform,
+                    "cores": opts.cores,
+                    "memory": opts.memory,
+                    "disk": opts.disk,
+                    "metadata": opts.metadata.unwrap_or_else(|| serde_json::json!({})),
+                },
+                "relationships": {
+                    "license": { "data": { "type": "licenses", "id": license_id } }
+                }
+            }
+        });
+        self.send_json_api(reqwest::Method::POST, "/machines", Some(body), None)
+            .await
+    }
+
+    /// `create_machine` + [`Self::validate_by_id`] composed into the
+    /// recommended "activate machine" flow (see [`Self::create_machine`]'s
+    /// doc comment for why creation alone doesn't enforce limits).
+    ///
+    /// If validation fails with an over-limit
+    /// [`crate::models::validation::ValidationCode`] (`TooManyMachines`,
+    /// `TooManyCores`, `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`)
+    /// and `auto_delete_on_overage` is `true`, the just-created machine is
+    /// deleted before returning the validation result — implementing
+    /// "reject over-limit activation" instead of leaving an orphaned
+    /// machine row behind. Deletion failures are not surfaced (the
+    /// validation result is what the caller asked for); a machine left
+    /// behind after a failed auto-delete is still visible to normal
+    /// machine-management calls for manual cleanup.
+    pub async fn activate_machine(
+        &self,
+        license_id: uuid::Uuid,
+        fingerprint: &str,
+        opts: CreateMachineOptions,
+        scope: Option<crate::models::validation::ScopeObject>,
+        auto_delete_on_overage: bool,
+    ) -> Result<crate::models::validation::ValidationResult, crate::TamgaError> {
+        let machine = self.create_machine(license_id, fingerprint, opts).await?;
+        let result = self.validate_by_id(license_id, scope, false, None).await;
+
+        if auto_delete_on_overage {
+            let is_overage = matches!(
+                &result,
+                Ok(r) if is_overage_code(&r.meta.code)
+            );
+            if is_overage {
+                let _ = self.delete_machine(machine.id).await;
+            }
+        }
+
+        result
+    }
+
+    /// `POST /machines/{machine_id}/actions/ping-heartbeat` — no body, sets
+    /// `last_heartbeat_at = now`. Returns the updated machine resource.
+    pub async fn ping_heartbeat(
+        &self,
+        machine_id: uuid::Uuid,
+    ) -> Result<crate::models::machine::MachineResource, crate::TamgaError> {
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/machines/{machine_id}/actions/ping-heartbeat"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// `POST /machines/{machine_id}/actions/reset-heartbeat` — no body,
+    /// fully rewinds heartbeat state to
+    /// [`crate::models::machine::HeartbeatStatus::NotStarted`].
+    pub async fn reset_heartbeat(
+        &self,
+        machine_id: uuid::Uuid,
+    ) -> Result<crate::models::machine::MachineResource, crate::TamgaError> {
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/machines/{machine_id}/actions/reset-heartbeat"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// `DELETE /machines/{machine_id}` — `204 No Content` on success.
+    pub async fn delete_machine(&self, machine_id: uuid::Uuid) -> Result<(), crate::TamgaError> {
+        let response = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/machines/{machine_id}"),
+                None,
+            )
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        Ok(())
+    }
+}
+
+/// Optional attributes for [`Client::create_machine`]/
+/// [`Client::activate_machine`]. All fields default to `None` — construct
+/// with [`Default::default()`] and set only what's known.
+#[derive(Debug, Clone, Default)]
+pub struct CreateMachineOptions {
+    /// Optional display name.
+    pub name: Option<String>,
+    /// IP address to record.
+    pub ip: Option<String>,
+    /// Hostname to record.
+    pub hostname: Option<String>,
+    /// OS/platform string to record.
+    pub platform: Option<String>,
+    /// CPU core count to record.
+    pub cores: Option<i32>,
+    /// Memory in bytes to record.
+    pub memory: Option<i64>,
+    /// Disk in bytes to record.
+    pub disk: Option<i64>,
+    /// Arbitrary caller-set metadata; defaults to `{}` if `None`.
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Whether a [`crate::models::validation::ValidationCode`] represents one
+/// of the over-limit outcomes [`Client::activate_machine`]'s auto-delete
+/// path reacts to.
+fn is_overage_code(code: &crate::models::validation::ValidationCode) -> bool {
+    use crate::models::validation::ValidationCode;
+    matches!(
+        code,
+        ValidationCode::TooManyMachines
+            | ValidationCode::TooManyCores
+            | ValidationCode::TooMuchMemory
+            | ValidationCode::TooMuchDisk
+            | ValidationCode::TooManyProcesses
+    )
 }
 
 #[cfg(test)]

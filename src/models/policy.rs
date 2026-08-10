@@ -251,20 +251,119 @@ mod overage_strategy_tests {
     }
 }
 
-/// Dead-machine culling behavior. Stub.
+/// What happens to a machine row once its heartbeat window elapses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HeartbeatCullStrategy {
-    /// Placeholder — replaced by the real 2-variant enum.
-    #[serde(other)]
-    Unknown,
+    /// The machine row is deleted once dead.
+    DeactivateDead,
+    /// The dead machine row is kept — the license owner can still see it.
+    KeepDead,
 }
 
-/// Dead-machine resurrection grace window. Stub.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+/// How long after heartbeat expiry a dead machine may still be revived by a
+/// new ping, before [`HeartbeatCullStrategy`] takes effect.
+///
+/// Deserializes any unrecognized wire value to
+/// [`HeartbeatResurrectionStrategy::NoRevive`] rather than erroring — same
+/// rationale as [`OverageStrategy`]'s fallback: freshly-created policies
+/// currently default this field to the **non-existent** string
+/// `"NO_RESURRECTION"`, which the server itself silently treats as
+/// `NoRevive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeartbeatResurrectionStrategy {
-    /// Placeholder — replaced by the real 7-variant enum.
-    #[serde(other)]
-    Unknown,
+    /// Resurrection never allowed. Also the fallback for any unrecognized
+    /// wire value (including the real-world `"NO_RESURRECTION"` default
+    /// bug).
+    NoRevive,
+    /// Revivable within 1 minute of expiry.
+    OneMinuteRevive,
+    /// Revivable within 2 minutes of expiry.
+    TwoMinuteRevive,
+    /// Revivable within 5 minutes of expiry.
+    FiveMinuteRevive,
+    /// Revivable within 10 minutes of expiry.
+    TenMinuteRevive,
+    /// Revivable within 15 minutes of expiry.
+    FifteenMinuteRevive,
+    /// Always revivable, regardless of how long dead.
+    AlwaysRevive,
+}
+
+impl<'de> serde::Deserialize<'de> for HeartbeatResurrectionStrategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "NO_REVIVE" => HeartbeatResurrectionStrategy::NoRevive,
+            "1_MINUTE_REVIVE" => HeartbeatResurrectionStrategy::OneMinuteRevive,
+            "2_MINUTE_REVIVE" => HeartbeatResurrectionStrategy::TwoMinuteRevive,
+            "5_MINUTE_REVIVE" => HeartbeatResurrectionStrategy::FiveMinuteRevive,
+            "10_MINUTE_REVIVE" => HeartbeatResurrectionStrategy::TenMinuteRevive,
+            "15_MINUTE_REVIVE" => HeartbeatResurrectionStrategy::FifteenMinuteRevive,
+            "ALWAYS_REVIVE" => HeartbeatResurrectionStrategy::AlwaysRevive,
+            _ => HeartbeatResurrectionStrategy::NoRevive,
+        })
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_strategy_tests {
+    use super::*;
+
+    #[test]
+    fn cull_strategy_deserializes_both_known_wire_strings() {
+        let deactivate: HeartbeatCullStrategy =
+            serde_json::from_str("\"DEACTIVATE_DEAD\"").unwrap();
+        assert_eq!(deactivate, HeartbeatCullStrategy::DeactivateDead);
+        let keep: HeartbeatCullStrategy = serde_json::from_str("\"KEEP_DEAD\"").unwrap();
+        assert_eq!(keep, HeartbeatCullStrategy::KeepDead);
+    }
+
+    #[test]
+    fn resurrection_strategy_deserializes_all_7_known_wire_strings() {
+        let cases = [
+            ("\"NO_REVIVE\"", HeartbeatResurrectionStrategy::NoRevive),
+            (
+                "\"1_MINUTE_REVIVE\"",
+                HeartbeatResurrectionStrategy::OneMinuteRevive,
+            ),
+            (
+                "\"2_MINUTE_REVIVE\"",
+                HeartbeatResurrectionStrategy::TwoMinuteRevive,
+            ),
+            (
+                "\"5_MINUTE_REVIVE\"",
+                HeartbeatResurrectionStrategy::FiveMinuteRevive,
+            ),
+            (
+                "\"10_MINUTE_REVIVE\"",
+                HeartbeatResurrectionStrategy::TenMinuteRevive,
+            ),
+            (
+                "\"15_MINUTE_REVIVE\"",
+                HeartbeatResurrectionStrategy::FifteenMinuteRevive,
+            ),
+            (
+                "\"ALWAYS_REVIVE\"",
+                HeartbeatResurrectionStrategy::AlwaysRevive,
+            ),
+        ];
+        for (wire, expected) in cases {
+            let parsed: HeartbeatResurrectionStrategy = serde_json::from_str(wire).unwrap();
+            assert_eq!(parsed, expected, "wire value {wire}");
+        }
+    }
+
+    #[test]
+    fn resurrection_strategy_falls_back_to_no_revive_for_unrecognized_value() {
+        // Reproduces the real "NO_RESURRECTION" policy-create-default gotcha.
+        let parsed: HeartbeatResurrectionStrategy =
+            serde_json::from_str("\"NO_RESURRECTION\"").unwrap();
+        assert_eq!(parsed, HeartbeatResurrectionStrategy::NoRevive);
+    }
 }
 
 /// The full `policies` JSON:API resource. Stub — see module doc comment.
