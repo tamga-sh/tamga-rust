@@ -23,7 +23,7 @@
 /// matches `tamga-api`'s actual `MachineResource`/`MachineAttributes`
 /// serializer (`src/features/machines/serializer.rs`) — no `relationships`
 /// object, same as [`crate::models::license::LicenseResource`].
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MachineResource {
     /// UUIDv7 machine ID.
     pub id: uuid::Uuid,
@@ -36,7 +36,7 @@ pub struct MachineResource {
 
 /// Attributes of a [`MachineResource`], matching `tamga-api`'s
 /// `MachineAttributes` field-for-field.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MachineAttributes {
     /// Unique per `(account_id, license_id, fingerprint)`.
     pub fingerprint: String,
@@ -105,6 +105,22 @@ impl<'de> serde::Deserialize<'de> for HeartbeatStatus {
             "RESURRECTED" => HeartbeatStatus::Resurrected,
             other => HeartbeatStatus::Unknown(other.to_string()),
         })
+    }
+}
+
+impl serde::Serialize for HeartbeatStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = match self {
+            HeartbeatStatus::NotStarted => "NOT_STARTED",
+            HeartbeatStatus::Alive => "ALIVE",
+            HeartbeatStatus::Dead => "DEAD",
+            HeartbeatStatus::Resurrected => "RESURRECTED",
+            HeartbeatStatus::Unknown(s) => s,
+        };
+        serializer.serialize_str(s)
     }
 }
 

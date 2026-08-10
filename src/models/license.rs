@@ -11,7 +11,7 @@
 //! must not model a relationships field the server never sends.
 
 /// The `licenses` JSON:API resource: `{ id, type, attributes }`.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LicenseResource {
     /// UUIDv7 license ID.
     pub id: uuid::Uuid,
@@ -24,7 +24,7 @@ pub struct LicenseResource {
 
 /// Attributes of a [`LicenseResource`], matching `tamga-api`'s
 /// `LicenseAttributes` field-for-field.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LicenseAttributes {
     /// Optional display name.
     pub name: Option<String>,
