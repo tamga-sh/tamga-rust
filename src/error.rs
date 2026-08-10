@@ -97,6 +97,25 @@ pub enum TamgaError {
     /// [`ProofError`].
     #[error(transparent)]
     Proof(#[from] ProofError),
+    /// `404 NOT_FOUND` — the requested resource doesn't exist (or doesn't
+    /// belong to this account).
+    #[error("not found: {detail}", detail = .0.detail)]
+    NotFound(Box<JsonApiError>),
+    /// `401 UNAUTHORIZED` — missing or invalid credentials. Not currently
+    /// reachable on the license/machine endpoints this crate calls (see
+    /// module doc comment — auth isn't enforced there yet), but modeled
+    /// for forward-compatibility and any endpoint where it already applies.
+    #[error("unauthorized: {detail}", detail = .0.detail)]
+    Unauthorized(Box<JsonApiError>),
+    /// `403 FORBIDDEN` — credentials valid, but not permitted for this
+    /// operation.
+    #[error("forbidden: {detail}", detail = .0.detail)]
+    Forbidden(Box<JsonApiError>),
+    /// `500 INTERNAL_SERVER_ERROR` — generic server-side failure. The
+    /// server never leaks DB/internal detail into `detail` for this code —
+    /// don't expect this to be more specific than "something went wrong."
+    #[error("internal server error: {detail}", detail = .0.detail)]
+    InternalServerError(Box<JsonApiError>),
 }
 
 /// Failures while parsing or verifying a machine offline proof string
@@ -200,6 +219,10 @@ impl TamgaError {
             "LICENSE_KEY_MISSING" => TamgaError::LicenseKeyMissingApi(Box::new(err)),
             "FINGERPRINT_TAKEN" => TamgaError::FingerprintTaken(Box::new(err)),
             "PID_TAKEN" => TamgaError::PidTaken(Box::new(err)),
+            "NOT_FOUND" => TamgaError::NotFound(Box::new(err)),
+            "UNAUTHORIZED" => TamgaError::Unauthorized(Box::new(err)),
+            "FORBIDDEN" => TamgaError::Forbidden(Box::new(err)),
+            "INTERNAL_SERVER_ERROR" => TamgaError::InternalServerError(Box::new(err)),
             "DATASET_INVALID" => TamgaError::DatasetInvalid(Box::new(err)),
             "TTL_INVALID" => TamgaError::TtlInvalidApi(Box::new(err)),
             "SCHEME_NOT_SUPPORTED" => TamgaError::SchemeNotSupportedApi(Box::new(err)),
@@ -290,14 +313,46 @@ mod tests {
     fn unrecognized_code_maps_to_generic_api_variant() {
         let err = JsonApiError {
             id: "01926b3e-0000-7000-8000-000000000000".to_string(),
-            status: "404".to_string(),
-            code: "NOT_FOUND".to_string(),
-            title: "Not Found".to_string(),
-            detail: "not found".to_string(),
+            status: "429".to_string(),
+            code: "TOO_MANY_REQUESTS".to_string(),
+            title: "Too Many Requests".to_string(),
+            // Not modeled: the server declares this code but never
+            // constructs/returns it today (see CLAUDE.md's GOTCHAS) — a
+            // genuinely code-without-a-dedicated-variant example, unlike
+            // NOT_FOUND/etc. which now have their own typed variants.
+            detail: "rate limited".to_string(),
             source: None,
         };
         let mapped = TamgaError::from_json_api_error(err);
         assert!(matches!(mapped, TamgaError::Api(_)));
+    }
+
+    #[test]
+    fn fixed_status_codes_map_to_their_typed_variants() {
+        let build = |code: &str| JsonApiError {
+            id: "01926b3e-0000-7000-8000-000000000000".to_string(),
+            status: "0".to_string(),
+            code: code.to_string(),
+            title: "".to_string(),
+            detail: "".to_string(),
+            source: None,
+        };
+        assert!(matches!(
+            TamgaError::from_json_api_error(build("NOT_FOUND")),
+            TamgaError::NotFound(_)
+        ));
+        assert!(matches!(
+            TamgaError::from_json_api_error(build("UNAUTHORIZED")),
+            TamgaError::Unauthorized(_)
+        ));
+        assert!(matches!(
+            TamgaError::from_json_api_error(build("FORBIDDEN")),
+            TamgaError::Forbidden(_)
+        ));
+        assert!(matches!(
+            TamgaError::from_json_api_error(build("INTERNAL_SERVER_ERROR")),
+            TamgaError::InternalServerError(_)
+        ));
     }
 
     #[test]
