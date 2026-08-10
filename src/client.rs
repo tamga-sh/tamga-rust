@@ -403,6 +403,57 @@ impl Client {
         )
         .await
     }
+
+    /// `GET /licenses/{license_id}/actions/check-out` — raw
+    /// `application/octet-stream` `.lic` file body. Returns the PEM string
+    /// verbatim; pass it to
+    /// [`crate::checkout::license_file::verify_license_file`] to verify and
+    /// decode it. Non-idempotent — a fresh UUIDv7 backs each call, so
+    /// calling this twice yields two different certificates.
+    pub async fn check_out_license(
+        &self,
+        license_id: uuid::Uuid,
+        encrypt: bool,
+        ttl: Option<u64>,
+    ) -> Result<String, crate::TamgaError> {
+        let mut builder = self.request(
+            reqwest::Method::GET,
+            &format!("/licenses/{license_id}/actions/check-out"),
+            None,
+        );
+        builder = builder.query(&[("encrypt", encrypt.to_string())]);
+        if let Some(ttl) = ttl {
+            builder = builder.query(&[("ttl", ttl.to_string())]);
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        Ok(response.text().await?)
+    }
+
+    /// `POST /licenses/{license_id}/actions/check-out` — JSON:API variant,
+    /// returning a full [`crate::checkout::license_file::LicenseFileResource`]
+    /// (certificate plus `ttl`/`expiry`/`issued` metadata) instead of the
+    /// raw PEM bytes [`Self::check_out_license`] returns.
+    ///
+    /// Fails with a `LICENSE_NOT_ENCRYPTED` API error if `encrypt: true` is
+    /// requested for a license with no `key` set.
+    pub async fn check_out_license_json(
+        &self,
+        license_id: uuid::Uuid,
+        encrypt: bool,
+        ttl: Option<u64>,
+    ) -> Result<crate::checkout::license_file::LicenseFileResource, crate::TamgaError> {
+        let body = serde_json::json!({ "meta": { "encrypt": encrypt, "ttl": ttl } });
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/licenses/{license_id}/actions/check-out"),
+            Some(body),
+            None,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

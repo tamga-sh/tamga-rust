@@ -54,6 +54,70 @@ pub enum TamgaError {
     /// this error with retry logic.
     #[error("check-in not required: {detail}", detail = .0.detail)]
     CheckInNotRequired(Box<JsonApiError>),
+    /// A `.lic`/`.mach` offline file failed to parse or verify — see
+    /// [`CheckoutError`] for the specific stage that failed.
+    #[error(transparent)]
+    Checkout(#[from] CheckoutError),
+    /// `422 LICENSE_NOT_ENCRYPTED` — the server rejected an `encrypt: true`
+    /// checkout request because the license has no `key` set. A caller
+    /// error: check that the license has a key before requesting an
+    /// encrypted checkout.
+    #[error("license not encrypted: {detail}", detail = .0.detail)]
+    LicenseNotEncrypted(Box<JsonApiError>),
+}
+
+/// Cryptographic primitive failures — signature verification, decryption,
+/// or malformed key/signature material. Never distinguishes *why* a
+/// verification failed beyond this coarse granularity (e.g. "wrong key" vs
+/// "tampered ciphertext" both surface as [`CryptoError::DecryptionFailed`])
+/// — a more specific error would leak information useful to an attacker
+/// probing for valid inputs.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum CryptoError {
+    /// Public key bytes are malformed or the wrong length for the scheme.
+    #[error("invalid public key")]
+    InvalidKey,
+    /// Signature bytes are malformed or the wrong length for the scheme.
+    #[error("invalid signature encoding")]
+    InvalidSignature,
+    /// Signature verification failed — wrong key, tampered message, or both.
+    #[error("signature verification failed")]
+    VerificationFailed,
+    /// AEAD decryption failed — wrong key, tampered ciphertext, or tampered
+    /// tag. AES-GCM inherently cannot distinguish these.
+    #[error("decryption failed (wrong key or tampered ciphertext)")]
+    DecryptionFailed,
+}
+
+/// Failures while parsing or verifying a `.lic`/`.mach` offline checkout
+/// file — see `src/checkout/license_file.rs`'s module doc comment for the
+/// full verification flow this maps onto.
+#[derive(Debug, thiserror::Error)]
+pub enum CheckoutError {
+    /// Input didn't start/end with the expected `-----BEGIN ... -----`/
+    /// `-----END ... -----` PEM markers.
+    #[error("malformed PEM envelope: missing BEGIN/END markers")]
+    MalformedPem,
+    /// The PEM body, or the `enc`/`sig` fields inside it, wasn't valid
+    /// base64.
+    #[error("invalid base64 in certificate payload")]
+    InvalidBase64,
+    /// The decoded PEM body wasn't valid `{ enc, sig, alg }` JSON, or the
+    /// decrypted/decoded payload wasn't valid `{"data": ...}` JSON.
+    #[error("invalid JSON in certificate payload: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+    /// `alg` wasn't one of the two license-file values this SDK
+    /// understands (`"base64+ed25519"`, `"aes-256-gcm+ed25519"`).
+    #[error("unsupported algorithm: {0}")]
+    UnsupportedAlgorithm(String),
+    /// The file's `alg` requires decryption but no `license_key` was
+    /// supplied to the verify call.
+    #[error("license key is required to decrypt an encrypted checkout file")]
+    LicenseKeyMissing,
+    /// Signature verification or decryption itself failed — see
+    /// [`CryptoError`].
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
 }
 
 impl TamgaError {
@@ -66,6 +130,7 @@ impl TamgaError {
     pub(crate) fn from_json_api_error(err: JsonApiError) -> Self {
         match err.code.as_str() {
             "CHECK_IN_NOT_REQUIRED" => TamgaError::CheckInNotRequired(Box::new(err)),
+            "LICENSE_NOT_ENCRYPTED" => TamgaError::LicenseNotEncrypted(Box::new(err)),
             _ => TamgaError::Api(Box::new(err)),
         }
     }

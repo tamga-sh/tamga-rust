@@ -10,7 +10,60 @@
 //! output. Contrast with `src/crypto/hkdf.rs`, which machine file encryption
 //! uses instead and which *is* a proper KDF.
 //!
-//! Intended contents (see `docs/plans/tamga-rust.plan.md` §E):
-//! - `derive_license_file_key(license_key: &str) -> [u8; 32]`.
-//! - Test coverage: zero-pad behavior for keys shorter than 32 bytes,
-//!   truncate behavior for keys longer than 32 bytes.
+//! Ground-truth verified against the server's own derivation in
+//! `tamga-api/src/features/licenses/check_out_license.rs`:
+//! ```rust,ignore
+//! let kb = key_str.as_bytes();
+//! let mut key_bytes = vec![0u8; 32];
+//! let len = kb.len().min(32);
+//! key_bytes[..len].copy_from_slice(&kb[..len]);
+//! ```
+
+/// Derives the AES-256-GCM key for an encrypted `.lic` file: `license_key`'s
+/// raw UTF-8 bytes, zero-padded (if shorter than 32 bytes) or truncated (if
+/// longer) to exactly 32 bytes. Deliberately **not** a hash or KDF — see
+/// module doc comment.
+pub fn derive_license_file_key(license_key: &str) -> [u8; 32] {
+    let kb = license_key.as_bytes();
+    let mut key_bytes = [0u8; 32];
+    let len = kb.len().min(32);
+    key_bytes[..len].copy_from_slice(&kb[..len]);
+    key_bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_pads_keys_shorter_than_32_bytes() {
+        let key = derive_license_file_key("short");
+        assert_eq!(&key[..5], b"short");
+        assert_eq!(&key[5..], [0u8; 27]);
+    }
+
+    #[test]
+    fn truncates_keys_longer_than_32_bytes() {
+        let long_key = "a".repeat(50);
+        let key = derive_license_file_key(&long_key);
+        assert_eq!(key, [b'a'; 32]);
+    }
+
+    #[test]
+    fn exact_32_byte_key_is_unchanged() {
+        let exact = "a".repeat(32);
+        let key = derive_license_file_key(&exact);
+        assert_eq!(key, [b'a'; 32]);
+    }
+
+    #[test]
+    fn is_not_a_hash_same_prefix_different_length_diverges_only_after_prefix() {
+        // A real KDF/hash would produce a completely different key for any
+        // input change. This transform is a literal byte-copy, so two keys
+        // sharing a prefix must share that same prefix in the derived key
+        // too — proving this is NOT hashing the input.
+        let a = derive_license_file_key("abc");
+        let b = derive_license_file_key("abcdef");
+        assert_eq!(&a[..3], &b[..3]);
+    }
+}
