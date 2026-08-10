@@ -136,7 +136,16 @@ not "unify" them into one derivation function; that would silently break interop
 `.lic` or `.mach` format depending on which direction you "fixed" it.
 
 **Byte-exact JSON for offline proof** (`src/proof.rs`) — the signed payload's field order must match
-the server's exactly. Build it with a fixed-field-order `serde` struct, never a `HashMap`.
+the server's exactly. The server builds it via `serde_json::json!(...)`, and `serde_json::Map` is
+`BTreeMap`-backed (alphabetically sorted output) unless the `preserve_order` feature is enabled —
+which it is **not**, on either side (confirmed: no `indexmap` next to `serde_json` in either repo's
+`Cargo.lock`). So the actual wire bytes are alphabetically sorted at every nesting level, **not** the
+literal `account, machine, dataset` order the source code is written in. Build the payload with
+`serde_json::Value`/`json!()` (as `proof.rs` does) so it self-normalizes to the same order the server
+produces — a fixed-field-order `serde` struct declared in the server's literal source order would
+actually be wrong here. Never use a `HashMap` (non-deterministic iteration order). See `proof.rs`'s
+module doc comment and its `payload_json_matches_a_known_good_server_produced_fixture` test, which
+acts as a drift canary if a future dependency bump ever flips `preserve_order` on asymmetrically.
 
 ## Testing
 

@@ -642,6 +642,37 @@ impl Client {
         }
         Ok(())
     }
+
+    /// `POST /machines/{machine_id}/actions/generate-offline-proof` —
+    /// `dataset` defaults to `{}` if `None` (must be a JSON object; a
+    /// non-object fails server-side with `422 DATASET_INVALID`). Returns
+    /// the updated machine resource plus the `"v1x0.<base64>"` proof
+    /// string — pass the proof, plus the exact `account_id`/`machine_id`/
+    /// `fingerprint`/`dataset` tuple used here, to
+    /// [`crate::proof::verify_offline_proof`] to verify it fully offline.
+    pub async fn generate_offline_proof(
+        &self,
+        machine_id: uuid::Uuid,
+        dataset: Option<serde_json::Value>,
+    ) -> Result<(crate::models::machine::MachineResource, String), crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct ProofMeta {
+            proof: String,
+        }
+
+        let body = serde_json::json!({
+            "meta": { "dataset": dataset.unwrap_or_else(|| serde_json::json!({})) }
+        });
+        let (machine, meta): (crate::models::machine::MachineResource, ProofMeta) = self
+            .send_json_api_with_meta(
+                reqwest::Method::POST,
+                &format!("/machines/{machine_id}/actions/generate-offline-proof"),
+                Some(body),
+                None,
+            )
+            .await?;
+        Ok((machine, meta.proof))
+    }
 }
 
 /// Optional attributes for [`Client::create_machine`]/

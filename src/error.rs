@@ -84,6 +84,31 @@ pub enum TamgaError {
     /// fingerprint already exists on this license.
     #[error("fingerprint taken: {detail}", detail = .0.detail)]
     FingerprintTaken(Box<JsonApiError>),
+    /// `422 DATASET_INVALID` — `meta.dataset` sent to
+    /// `generate_offline_proof` wasn't a JSON object (arrays/scalars are
+    /// rejected).
+    #[error("dataset invalid: {detail}", detail = .0.detail)]
+    DatasetInvalid(Box<JsonApiError>),
+    /// A `"v1x0."` offline proof failed to parse or verify — see
+    /// [`ProofError`].
+    #[error(transparent)]
+    Proof(#[from] ProofError),
+}
+
+/// Failures while parsing or verifying a machine offline proof string
+/// (`"v1x0.<base64 signature>"`) — see `src/proof.rs`'s module doc comment
+/// for the full verification flow this maps onto.
+#[derive(Debug, thiserror::Error)]
+pub enum ProofError {
+    /// Input didn't start with the expected `"v1x0."` prefix.
+    #[error("malformed proof: missing v1x0. prefix")]
+    MalformedProof,
+    /// The signature portion (after the prefix) wasn't valid base64.
+    #[error("invalid base64 in proof signature")]
+    InvalidBase64,
+    /// Signature verification itself failed — see [`CryptoError`].
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
 }
 
 /// Cryptographic primitive failures — signature verification, decryption,
@@ -170,6 +195,7 @@ impl TamgaError {
             "LICENSE_NOT_ENCRYPTED" => TamgaError::LicenseNotEncrypted(Box::new(err)),
             "LICENSE_KEY_MISSING" => TamgaError::LicenseKeyMissingApi(Box::new(err)),
             "FINGERPRINT_TAKEN" => TamgaError::FingerprintTaken(Box::new(err)),
+            "DATASET_INVALID" => TamgaError::DatasetInvalid(Box::new(err)),
             "TTL_INVALID" => TamgaError::TtlInvalidApi(Box::new(err)),
             "SCHEME_NOT_SUPPORTED" => TamgaError::SchemeNotSupportedApi(Box::new(err)),
             _ => TamgaError::Api(Box::new(err)),
