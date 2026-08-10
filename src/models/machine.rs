@@ -19,10 +19,58 @@
 //!   machine's 600s) with no resurrection grace period — a dead process row
 //!   is deleted immediately, no `KEEP_DEAD` equivalent.
 
-/// The `machines` JSON:API resource. Stub — see module doc comment above.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+/// The `machines` JSON:API resource: `{ id, type, attributes }`. Field set
+/// matches `tamga-api`'s actual `MachineResource`/`MachineAttributes`
+/// serializer (`src/features/machines/serializer.rs`) — no `relationships`
+/// object, same as [`crate::models::license::LicenseResource`].
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct MachineResource {
-    _private: (),
+    /// UUIDv7 machine ID.
+    pub id: uuid::Uuid,
+    /// Always `"machines"`.
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    /// The resource's attribute bag.
+    pub attributes: MachineAttributes,
+}
+
+/// Attributes of a [`MachineResource`], matching `tamga-api`'s
+/// `MachineAttributes` field-for-field. `heartbeat_status` is left as a
+/// plain `String` here rather than the typed [`HeartbeatStatus`] enum —
+/// Section G wires that conversion up alongside the machine-management
+/// endpoints that actually consume heartbeat state.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MachineAttributes {
+    /// Unique per `(account_id, license_id, fingerprint)`.
+    pub fingerprint: String,
+    /// CPU core count, if reported at registration.
+    pub cores: Option<i32>,
+    /// Memory in bytes, if reported.
+    pub memory: Option<i64>,
+    /// Disk in bytes, if reported.
+    pub disk: Option<i64>,
+    /// IP address, if reported.
+    pub ip: Option<String>,
+    /// Reported hostname, if any.
+    pub hostname: Option<String>,
+    /// Reported OS/platform string, if any.
+    pub platform: Option<String>,
+    /// Optional display name.
+    pub name: Option<String>,
+    /// Wire string, e.g. `"NOT_STARTED"`/`"ALIVE"`/`"DEAD"`/`"RESURRECTED"`.
+    pub heartbeat_status: String,
+    /// Timestamp of the last `ping-heartbeat` call.
+    pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Server-computed next-expected-heartbeat deadline, if derivable.
+    pub next_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Timestamp of the last machine-file checkout.
+    pub last_check_out_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Arbitrary caller-set metadata.
+    pub metadata: serde_json::Value,
+    /// Creation timestamp.
+    pub created: chrono::DateTime<chrono::Utc>,
+    /// Last-updated timestamp.
+    pub updated: chrono::DateTime<chrono::Utc>,
 }
 
 /// Machine heartbeat state machine. Stub.

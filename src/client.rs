@@ -454,6 +454,68 @@ impl Client {
         )
         .await
     }
+
+    /// `GET /machines/{machine_id}/actions/check-out` — raw
+    /// `application/octet-stream` `.mach` file body. Returns the PEM string
+    /// verbatim; pass it to
+    /// [`crate::checkout::machine_file::verify_machine_file`] to verify and
+    /// decode it.
+    ///
+    /// If `ttl` is set, it's pre-checked client-side via
+    /// [`crate::checkout::machine_file::check_ttl`] before the round trip
+    /// — see that function's doc comment.
+    pub async fn check_out_machine(
+        &self,
+        machine_id: uuid::Uuid,
+        encrypt: bool,
+        ttl: Option<u64>,
+    ) -> Result<String, crate::TamgaError> {
+        if let Some(ttl) = ttl {
+            crate::checkout::machine_file::check_ttl(ttl)?;
+        }
+        let mut builder = self.request(
+            reqwest::Method::GET,
+            &format!("/machines/{machine_id}/actions/check-out"),
+            None,
+        );
+        builder = builder.query(&[("encrypt", encrypt.to_string())]);
+        if let Some(ttl) = ttl {
+            builder = builder.query(&[("ttl", ttl.to_string())]);
+        }
+        let response = builder.send().await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        Ok(response.text().await?)
+    }
+
+    /// `POST /machines/{machine_id}/actions/check-out` — JSON:API variant,
+    /// returning a full
+    /// [`crate::checkout::machine_file::MachineFileResource`] instead of
+    /// the raw PEM bytes [`Self::check_out_machine`] returns.
+    ///
+    /// Fails with a `LICENSE_KEY_MISSING` API error if `encrypt: true` is
+    /// requested for a machine whose license has no `key` set, or
+    /// `SCHEME_NOT_SUPPORTED` if the license's scheme is
+    /// `RSA_2048_JWT_RS256`.
+    pub async fn check_out_machine_json(
+        &self,
+        machine_id: uuid::Uuid,
+        encrypt: bool,
+        ttl: Option<u64>,
+    ) -> Result<crate::checkout::machine_file::MachineFileResource, crate::TamgaError> {
+        if let Some(ttl) = ttl {
+            crate::checkout::machine_file::check_ttl(ttl)?;
+        }
+        let body = serde_json::json!({ "meta": { "encrypt": encrypt, "ttl": ttl } });
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/machines/{machine_id}/actions/check-out"),
+            Some(body),
+            None,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

@@ -64,6 +64,22 @@ pub enum TamgaError {
     /// encrypted checkout.
     #[error("license not encrypted: {detail}", detail = .0.detail)]
     LicenseNotEncrypted(Box<JsonApiError>),
+    /// `422 LICENSE_KEY_MISSING` — the server rejected an `encrypt: true`
+    /// machine checkout because the machine's license has no `key` set.
+    /// Distinct API error code from `LICENSE_NOT_ENCRYPTED` (license file
+    /// checkout's equivalent) despite the similar meaning.
+    #[error("license key missing: {detail}", detail = .0.detail)]
+    LicenseKeyMissingApi(Box<JsonApiError>),
+    /// `422 TTL_INVALID` — the server rejected a `ttl` outside `(0,
+    /// 31536000]`. The SDK also pre-checks this client-side (see
+    /// [`crate::checkout::machine_file::check_ttl`]) so this variant is
+    /// normally only reachable if the client-side check was bypassed.
+    #[error("ttl invalid: {detail}", detail = .0.detail)]
+    TtlInvalidApi(Box<JsonApiError>),
+    /// `422 SCHEME_NOT_SUPPORTED` — the server rejected a machine checkout
+    /// because the license's scheme is `RSA_2048_JWT_RS256`.
+    #[error("scheme not supported: {detail}", detail = .0.detail)]
+    SchemeNotSupportedApi(Box<JsonApiError>),
 }
 
 /// Cryptographic primitive failures — signature verification, decryption,
@@ -114,6 +130,23 @@ pub enum CheckoutError {
     /// supplied to the verify call.
     #[error("license key is required to decrypt an encrypted checkout file")]
     LicenseKeyMissing,
+    /// The file's `alg` requires decryption but no `fingerprint` was
+    /// supplied to [`crate::checkout::machine_file::verify_machine_file`]
+    /// (machine files, unlike license files, need both the license key
+    /// *and* the target machine's fingerprint to decrypt).
+    #[error("machine fingerprint is required to decrypt an encrypted machine file")]
+    FingerprintMissing,
+    /// `RSA_2048_JWT_RS256` was passed as the verification scheme for a
+    /// `.mach` file — this scheme is not supported for machine file
+    /// checkout (the server itself rejects generating one with `422
+    /// SCHEME_NOT_SUPPORTED`); rejected up front, before any parsing.
+    #[error("scheme not supported for machine file checkout: RSA_2048_JWT_RS256")]
+    SchemeNotSupported,
+    /// Client-side pre-check failure: `ttl` must be `> 0` and
+    /// `<= 31536000` (365 days) — mirrors the server's own validated range
+    /// (`422 TTL_INVALID`), checked before the round trip.
+    #[error("ttl out of range: {0}")]
+    TtlOutOfRange(String),
     /// Signature verification or decryption itself failed — see
     /// [`CryptoError`].
     #[error(transparent)]
@@ -131,6 +164,9 @@ impl TamgaError {
         match err.code.as_str() {
             "CHECK_IN_NOT_REQUIRED" => TamgaError::CheckInNotRequired(Box::new(err)),
             "LICENSE_NOT_ENCRYPTED" => TamgaError::LicenseNotEncrypted(Box::new(err)),
+            "LICENSE_KEY_MISSING" => TamgaError::LicenseKeyMissingApi(Box::new(err)),
+            "TTL_INVALID" => TamgaError::TtlInvalidApi(Box::new(err)),
+            "SCHEME_NOT_SUPPORTED" => TamgaError::SchemeNotSupportedApi(Box::new(err)),
             _ => TamgaError::Api(Box::new(err)),
         }
     }

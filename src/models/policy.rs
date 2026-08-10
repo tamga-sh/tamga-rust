@@ -47,12 +47,84 @@
 //!   introspect these two limits client-side, only observe
 //!   `TOO_MUCH_MEMORY`/`TOO_MUCH_DISK` on a failed validation.
 
-/// Signing scheme for checkout/license keys. Stub — see module doc comment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+/// Signing scheme used for license/machine checkout files and (always,
+/// regardless of this value) machine offline proofs.
+///
+/// The wire field (`license.scheme`/`policy.scheme`) is `Option<String>` —
+/// `None` or `""` means "legacy plain/unsigned key" and has **no**
+/// corresponding variant here. When generating a **machine** file the
+/// server defaults an unset scheme to [`LicenseScheme::Ed25519Sign`] (see
+/// `tamga-api/src/features/machines/check_out_machine.rs`); callers of
+/// [`crate::checkout::machine_file::verify_machine_file`] whose license has
+/// no `scheme` set must pass `Ed25519Sign` to match, not skip verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LicenseScheme {
-    /// Placeholder — replaced by the real 5-variant-plus-`None` enum.
-    #[serde(other)]
-    Unknown,
+    /// Ed25519 signature. The machine-file default when a license has no
+    /// `scheme` set.
+    Ed25519Sign,
+    /// RSA-2048 PKCS#1 v1.5 / SHA-256.
+    Rsa2048Pkcs1Sign,
+    /// RSA-2048 PSS / SHA-256.
+    Rsa2048Pkcs1PssSign,
+    /// ECDSA P-256 / SHA-256 (ASN.1 DER signature).
+    EcdsaP256Sign,
+    /// RS256-signed JWT. **Not supported for machine file checkout** — the
+    /// server returns `422 SCHEME_NOT_SUPPORTED`; a verifier must reject
+    /// this scheme up front rather than attempt JWT parsing.
+    Rsa2048JwtRs256,
+}
+
+impl LicenseScheme {
+    /// Parses the wire string (`license.scheme`/`policy.scheme`, when
+    /// `Some`). Returns `None` for an unrecognized string, mirroring the
+    /// server's own `LicenseScheme::from_str` — this crate has no
+    /// `Unknown` fallback variant for a scheme, since an unrecognized
+    /// signing algorithm can't be dispatched to any verifier.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ED25519_SIGN" => Some(LicenseScheme::Ed25519Sign),
+            "RSA_2048_PKCS1_SIGN" => Some(LicenseScheme::Rsa2048Pkcs1Sign),
+            "RSA_2048_PKCS1_PSS_SIGN" => Some(LicenseScheme::Rsa2048Pkcs1PssSign),
+            "ECDSA_P256_SIGN" => Some(LicenseScheme::EcdsaP256Sign),
+            "RSA_2048_JWT_RS256" => Some(LicenseScheme::Rsa2048JwtRs256),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod license_scheme_tests {
+    use super::*;
+
+    #[test]
+    fn parses_all_5_known_wire_strings() {
+        assert_eq!(
+            LicenseScheme::parse("ED25519_SIGN"),
+            Some(LicenseScheme::Ed25519Sign)
+        );
+        assert_eq!(
+            LicenseScheme::parse("RSA_2048_PKCS1_SIGN"),
+            Some(LicenseScheme::Rsa2048Pkcs1Sign)
+        );
+        assert_eq!(
+            LicenseScheme::parse("RSA_2048_PKCS1_PSS_SIGN"),
+            Some(LicenseScheme::Rsa2048Pkcs1PssSign)
+        );
+        assert_eq!(
+            LicenseScheme::parse("ECDSA_P256_SIGN"),
+            Some(LicenseScheme::EcdsaP256Sign)
+        );
+        assert_eq!(
+            LicenseScheme::parse("RSA_2048_JWT_RS256"),
+            Some(LicenseScheme::Rsa2048JwtRs256)
+        );
+    }
+
+    #[test]
+    fn rejects_unrecognized_scheme_string() {
+        assert_eq!(LicenseScheme::parse("BOGUS"), None);
+        assert_eq!(LicenseScheme::parse(""), None);
+    }
 }
 
 /// Overage handling for machine/core/memory/disk/process limits — how far
