@@ -1,25 +1,56 @@
-//! TODO(tamga-rust §L): full working example — check out an encrypted
-//! `.lic` file and verify it fully offline (no further network access).
+//! Checks out an encrypted `.lic` file and verifies it fully offline (no
+//! further network access past the initial checkout call).
 //!
-//! Intended flow once `Client` and `src/checkout/license_file.rs` land (see
-//! `docs/plans/tamga-rust.plan.md` §B, §E):
+//! ```bash
+//! TAMGA_ACCOUNT_ID=... TAMGA_HOST=api.tamga.sh TAMGA_LICENSE_ID=... \
+//!     TAMGA_LICENSE_KEY=... TAMGA_ED25519_PUBKEY_B64=... \
+//!     cargo run --example verify_license_file
+//! ```
 //!
-//! 1. Build a `ClientConfig` and `Client` as in `validate_license.rs`.
-//! 2. Call `client.check_out_license(license_id, /* encrypt */ true,
-//!    /* ttl */ Some(3600)).await` to obtain raw `.lic` bytes.
-//! 3. Drop the network connection conceptually here — everything past this
-//!    point works fully offline.
-//! 4. Call `tamga::checkout::license_file::verify_license_file(&pem,
-//!    &ed25519_pubkey, Some(license_key))` and print the recovered
-//!    `LicenseResource`.
-//! 5. Demonstrate the client-side expiry check the SDK is responsible for
-//!    (`ttl`/`expiry` are checkout metadata only — never re-checked
-//!    server-side, per `docs/sdk.md` §4).
+//! `TAMGA_ED25519_PUBKEY_B64` is your account's public Ed25519 key
+//! (base64), used to verify the checkout signature completely offline —
+//! this is the core value proposition of this SDK over hand-rolling HTTP
+//! calls.
 
-fn main() {
-    todo!(
-        "stub — see docs/plans/tamga-rust.plan.md Section L; \
-         implementation deferred until src/checkout/license_file.rs has a \
-         real verify_license_file"
+use tamga::checkout::license_file::verify_license_file;
+use tamga::crypto::ed25519::public_key_from_base64;
+use tamga::transport::AuthTransport;
+use tamga::{Client, ClientConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let account_id = std::env::var("TAMGA_ACCOUNT_ID")?;
+    let host = std::env::var("TAMGA_HOST").unwrap_or_else(|_| "api.tamga.sh".to_string());
+    let license_id: uuid::Uuid = std::env::var("TAMGA_LICENSE_ID")?.parse()?;
+    let license_key = std::env::var("TAMGA_LICENSE_KEY")?;
+    let pubkey = public_key_from_base64(&std::env::var("TAMGA_ED25519_PUBKEY_B64")?)?;
+
+    let config = ClientConfig::builder(account_id, host)
+        .auth(AuthTransport::License(license_key.clone()))
+        .build();
+    let client = Client::new(config)?;
+
+    // Check out an encrypted, 1-hour-metadata-TTL license file.
+    let pem = client
+        .check_out_license(license_id, /* encrypt */ true, Some(3600))
+        .await?;
+
+    // --- Everything below this point requires no network access at all. ---
+
+    let license = verify_license_file(&pem, &pubkey, Some(&license_key))?;
+    println!(
+        "verified offline: license {} (key: {:?}, status: {})",
+        license.id, license.attributes.key, license.attributes.status
     );
+
+    // `ttl`/`expiry` on the checkout response are metadata only — never
+    // re-checked server-side on any later validation. Enforcing an offline
+    // file's expiry is entirely this SDK's/caller's responsibility; do it
+    // explicitly rather than assuming a re-validation call would catch it.
+    println!(
+        "note: this SDK does not auto-enforce checkout ttl/expiry — check \
+         it yourself if your offline-file flow needs that guarantee"
+    );
+
+    Ok(())
 }

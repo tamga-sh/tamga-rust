@@ -9,12 +9,17 @@ Official Rust SDK for [Tamga](https://tamga.sh). Integrate license
 activation, offline verification, and machine management into your Rust
 applications.
 
-> **Status: scaffold.** This crate currently contains project structure,
-> module wiring, and doc-comment placeholders only — no HTTP client or
-> cryptographic verification is implemented yet. The snippet below shows the
-> *intended* API shape and will not compile against the crate as it stands
-> today. Track implementation progress in
-> [`docs/plans/tamga-rust.plan.md`](docs/plans/tamga-rust.plan.md).
+> **Status: Sections A–L implemented and tested** (client/transport,
+> license validation/check-in/checkout, machine checkout/management/offline
+> proof, components/processes, entitlements, error model). Sections E, F,
+> and H (all cryptographic code) have each passed a dedicated
+> `security-reviewer` pass — see
+> [`docs/plans/tamga-rust.plan.md`](docs/plans/tamga-rust.plan.md) for the
+> full per-section checklist and recorded review outcomes. Not yet done:
+> Section M (CI/release automation hasn't been exercised against a real CI
+> run yet) and capturing real `tests/fixtures/*.lic`/`*.mach` files from a
+> live server (current tests generate fixtures in-process against the
+> documented wire format instead).
 
 ## Install
 
@@ -26,22 +31,25 @@ Published on [crates.io](https://crates.io/crates/tamga) as the bare name
 `tamga` — see [`docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
 in `tamga-api` for the full cross-SDK naming rationale.
 
-## Quickstart (illustrative — stub API, not yet implemented)
+## Quickstart
+
+See also `examples/validate_license.rs` for a complete, runnable version of
+this.
 
 ```rust,ignore
-use tamga::client::{Client, ClientConfig};
+use tamga::transport::AuthTransport;
+use tamga::{Client, ClientConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ClientConfig::builder()
-        .account_id("your-account-id")
-        .base_url("https://api.tamga.sh")
-        .build()?;
+    let config = ClientConfig::builder("your-account-id", "api.tamga.sh")
+        .auth(AuthTransport::License("YOUR-LICENSE-KEY".to_string()))
+        .build();
 
     let client = Client::new(config)?;
 
     // Validate a license by its raw key.
-    let result = client.validate_by_key("YOUR-LICENSE-KEY").await?;
+    let result = client.validate_by_key("YOUR-LICENSE-KEY", None).await?;
 
     match result.meta.code {
         tamga::models::validation::ValidationCode::Valid => {
@@ -90,7 +98,9 @@ verifier exist because they replicate exact server behavior — **do not
    strategy.
 
 See `src/crypto/naive_key.rs` and `src/crypto/ed25519.rs` for the
-authoritative doc comments once implemented.
+authoritative doc comments — both crypto sections (E and F) have passed a
+dedicated `security-reviewer` pass; see `docs/plans/tamga-rust.plan.md` for
+the recorded outcomes.
 
 ## Known Server-Side Gaps (scoped to this SDK)
 

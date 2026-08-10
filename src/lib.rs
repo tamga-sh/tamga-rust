@@ -3,14 +3,18 @@
 //! Official Rust SDK for [Tamga](https://tamga.sh) — license activation, offline
 //! verification, and machine management for Rust applications.
 //!
-//! **Status: scaffold only.** This crate currently contains module wiring and
-//! doc-comment placeholders describing intended contents (see
-//! `docs/plans/tamga-rust.plan.md` in the SDK-index repo, Section A). No HTTP
-//! client, request builder, or cryptographic verification logic is implemented
-//! yet — those are deferred to dedicated follow-up sessions covering
-//! `docs/plans/tamga-rust.plan.md` Sections B through M.
+//! **Status: Sections A–L implemented and tested** — see
+//! `docs/plans/tamga-rust.plan.md` for the full per-section checklist.
+//! Sections E, F, and H (all cryptographic code — license checkout, machine
+//! checkout, offline proof) have each passed a dedicated `security-reviewer`
+//! pass; outcomes are recorded in the plan file. Not yet done: Section M
+//! (CI/release automation hasn't been exercised against a real CI run), and
+//! `tests/fixtures/` still generates fixtures in-process against the
+//! documented wire format rather than from real captured server output (no
+//! live `tamga-api` instance was available across the sessions that built
+//! this crate).
 //!
-//! ## Intended shape (once implemented)
+//! ## Shape
 //!
 //! A single [`client::Client`] built from a [`client::ClientConfig`] exposes every
 //! server endpoint (validate, check-in, checkout, machine management,
@@ -34,7 +38,10 @@
 //! header (planned EE feature, not read server-side), and client-side 429
 //! backoff handling (the server never returns 429 today).
 
-#![cfg_attr(not(test), warn(missing_docs))]
+// Promoted from `warn` to `deny` once doc coverage across the public API
+// was complete (see `docs/plans/tamga-rust.plan.md` §L) — a genuinely
+// undocumented public item is now a build failure, not a silent gap.
+#![cfg_attr(not(test), deny(missing_docs))]
 
 pub mod checkout;
 pub mod client;
@@ -44,9 +51,6 @@ pub mod models;
 pub mod proof;
 pub mod transport;
 
-// Re-exports of the public API surface. `Client`/`ClientConfig`/`TamgaError`
-// are stub marker types today (Section A) — real fields and methods land in
-// Sections B/K of the plan. Re-exported now so the crate root shape is
-// stable across that transition.
+// Re-exports of the crate's most commonly used public API surface.
 pub use client::{Client, ClientConfig};
 pub use error::TamgaError;

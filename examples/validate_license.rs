@@ -1,22 +1,57 @@
-//! TODO(tamga-rust §L): full working example — validate a license by key
-//! against a running `tamga-api` instance and interpret the resulting
-//! `ValidationCode`.
+//! Validates a license by key against a running `tamga-api` instance and
+//! interprets the resulting `ValidationCode`.
 //!
-//! Intended flow once `Client`/`ClientConfig` land (see
-//! `docs/plans/tamga-rust.plan.md` §B, §C):
-//!
-//! 1. Build a `ClientConfig` from `TAMGA_ACCOUNT_ID` / `TAMGA_BASE_URL` env
-//!    vars (or hardcoded values for the example).
-//! 2. Construct a `Client`.
-//! 3. Call `client.validate_by_key("<license-key>").await`.
-//! 4. Match on the returned `ValidationCode` and print a human-readable
-//!    outcome, distinguishing the 14 reachable codes from the 10 that are
-//!    declared but not yet wired server-side (see `docs/sdk.md` → Known
-//!    Server-Side Gaps item 4).
+//! ```bash
+//! TAMGA_ACCOUNT_ID=... TAMGA_HOST=api.tamga.sh TAMGA_LICENSE_KEY=... \
+//!     cargo run --example validate_license
+//! ```
 
-fn main() {
-    todo!(
-        "stub — see docs/plans/tamga-rust.plan.md Section L; \
-         implementation deferred until src/client.rs has a real Client"
-    );
+use tamga::models::validation::ValidationCode;
+use tamga::transport::AuthTransport;
+use tamga::{Client, ClientConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let account_id = std::env::var("TAMGA_ACCOUNT_ID")?;
+    let host = std::env::var("TAMGA_HOST").unwrap_or_else(|_| "api.tamga.sh".to_string());
+    let license_key = std::env::var("TAMGA_LICENSE_KEY")?;
+
+    // `AuthTransport::License` is the primary transport for embedded/client
+    // SDKs validating against a raw license key — see
+    // `src/transport.rs`'s doc comment.
+    let config = ClientConfig::builder(account_id, host)
+        .auth(AuthTransport::License(license_key.clone()))
+        .build();
+    let client = Client::new(config)?;
+
+    let result = client.validate_by_key(&license_key, None).await?;
+
+    // Only 14 of the 24 modeled ValidationCode variants are reachable
+    // today — see the enum's own doc comment for the full ✅/⛔ breakdown.
+    match result.meta.code {
+        ValidationCode::Valid => {
+            println!("✅ license is valid");
+        }
+        ValidationCode::Suspended => println!("❌ license is suspended"),
+        ValidationCode::Expired => println!("❌ license has expired"),
+        ValidationCode::Overdue => println!("❌ license is overdue for check-in"),
+        ValidationCode::TooManyMachines
+        | ValidationCode::TooManyCores
+        | ValidationCode::TooMuchMemory
+        | ValidationCode::TooMuchDisk
+        | ValidationCode::TooManyProcesses => {
+            println!(
+                "❌ license is over a resource limit: {:?}",
+                result.meta.code
+            );
+        }
+        ValidationCode::TooManyUses => println!("❌ license has reached its use limit"),
+        other => println!(
+            "❌ license is not valid: {other:?} ({})",
+            result.meta.detail
+        ),
+    }
+
+    println!("server detail: {}", result.meta.detail);
+    Ok(())
 }

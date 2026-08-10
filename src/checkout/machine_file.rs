@@ -117,8 +117,8 @@ fn scheme_alg_suffix(scheme: crate::models::policy::LicenseScheme) -> &'static s
 /// `scheme` **must** come from the license's own `scheme` field (via
 /// whatever license resource governs this machine) — never from parsing
 /// the file's `alg` string, which cannot safely disambiguate
-/// `RSA_2048_PKCS1_SIGN` from `RSA_2048_JWT_RS256` (see
-/// [`scheme_alg_suffix`]). If the license has no `scheme` set, pass
+/// `RSA_2048_PKCS1_SIGN` from `RSA_2048_JWT_RS256` (see this module's
+/// private `scheme_alg_suffix` helper). If the license has no `scheme` set, pass
 /// [`crate::models::policy::LicenseScheme::Ed25519Sign`] — the server's own
 /// default when generating a machine file for an unset scheme.
 ///
