@@ -13,9 +13,7 @@ applications.
 > license validation/check-in/checkout, machine checkout/management/offline
 > proof, components/processes, entitlements, error model). Sections E, F,
 > and H (all cryptographic code) have each passed a dedicated
-> `security-reviewer` pass — see
-> [`docs/plans/tamga-rust.plan.md`](docs/plans/tamga-rust.plan.md) for the
-> full per-section checklist and recorded review outcomes. Not yet done:
+> `security-reviewer` pass. Not yet done:
 > Section M (CI/release automation hasn't been exercised against a real CI
 > run yet) and capturing real `tests/fixtures/*.lic`/`*.mach` files from a
 > live server (current tests generate fixtures in-process against the
@@ -99,8 +97,7 @@ verifier exist because they replicate exact server behavior — **do not
 
 See `src/crypto/naive_key.rs` and `src/crypto/ed25519.rs` for the
 authoritative doc comments — both crypto sections (E and F) have passed a
-dedicated `security-reviewer` pass; see `docs/plans/tamga-rust.plan.md` for
-the recorded outcomes.
+dedicated `security-reviewer` pass.
 
 ## Known Server-Side Gaps (scoped to this SDK)
 
@@ -125,8 +122,6 @@ surface:
 
 ## Documentation
 
-- [`docs/plans/tamga-rust.plan.md`](docs/plans/tamga-rust.plan.md) — this
-  repo's implementation plan and architecture reference.
 - [`docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
   in `tamga-api` — the authoritative protocol/feature specification every
   field name, endpoint, and enum value in this SDK is verified against.
