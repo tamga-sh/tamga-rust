@@ -41,6 +41,10 @@ jobs:
     if: github.repository_owner == 'tamga-sh'
     permissions:
       contents: write
+      # release-plz's `release` command looks up the PR associated with
+      # each commit (to link release notes back to it); without this the
+      # GitHub API call 403s with "Resource not accessible by integration".
+      pull-requests: read
       id-token: write # required for crates.io Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
