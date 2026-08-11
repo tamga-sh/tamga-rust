@@ -83,6 +83,6 @@ jobs:
       # Pinned to the exact MSRV (1.75.0), separate from the floating
       # `stable` toolchain used by the other jobs — catches accidental use
       # of a newer-than-MSRV language feature or API that `stable` wouldn't.
-      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features
