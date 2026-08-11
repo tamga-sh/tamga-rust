@@ -45,7 +45,7 @@ ed25519-dalek = "2"
 # (Marvin timing attack) is unpatched; `aws-lc-rs` is used instead and the `rsa`
 # crate is banned outright via deny.toml `bans.deny`.
 aws-lc-rs = "1"
-p256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
