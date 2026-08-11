@@ -47,7 +47,7 @@ ed25519-dalek = "2"
 aws-lc-rs = "1"
 p256 = { version = "0.13", features = ["ecdsa"] }
 aes-gcm = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = "0.10"
 
 [dev-dependencies]
