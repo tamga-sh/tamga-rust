@@ -57,4 +57,4 @@ proptest = "1"
 insta = { version = "1", features = ["json"] }
 # Test-only: generating fresh Ed25519 keypairs for crypto unit tests
 # (production code only ever verifies, never generates, keys).
-rand = "0.8"
+rand = "0.10"
