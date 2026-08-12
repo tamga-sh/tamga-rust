@@ -291,7 +291,7 @@ mod tests {
         let mut enc_bytes = {
             use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
             use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
-            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(enc_key));
+            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*enc_key));
             let mut nonce_bytes = [0u8; 12];
             AeadOsRng.fill_bytes(&mut nonce_bytes);
             let nonce = Nonce::from(nonce_bytes);

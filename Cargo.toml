@@ -49,6 +49,12 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+# Zeroizes derived symmetric keys on drop (naive_key.rs, hkdf.rs) so key
+# material doesn't sit in memory longer than necessary. Zero-dependency,
+# RustCrypto-maintained, MIT/Apache-2.0 -- the de facto standard for this
+# in the Rust crypto ecosystem, already a near-universal transitive
+# dependency of crates like aes-gcm itself.
+zeroize = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
