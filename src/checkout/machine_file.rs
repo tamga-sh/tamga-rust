@@ -383,7 +383,7 @@ mod tests {
         let license_key = "lic-abc123";
         let fingerprint = "fp-abc123";
         let key = crate::crypto::hkdf::derive_machine_file_key(license_key, fingerprint);
-        let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, Some(key));
+        let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, Some(*key));
 
         // Correct fingerprint decrypts fine.
         let machine = verify_machine_file(

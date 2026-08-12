@@ -14,6 +14,7 @@
 //!
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 const SALT: &[u8] = b"tamga:machine-file-key-v1";
 
@@ -22,10 +23,16 @@ const SALT: &[u8] = b"tamga:machine-file-key-v1";
 /// `ikm = license_key`, `info = fingerprint`. HKDF (rather than raw
 /// `SHA256(license_key || fingerprint)`) avoids prefix-collision — see the
 /// module doc comment.
-pub fn derive_machine_file_key(license_key: &str, fingerprint: &str) -> [u8; 32] {
+///
+/// Returns [`Zeroizing<[u8; 32]>`] rather than a bare array so the derived
+/// key material is wiped from memory when it goes out of scope — see
+/// `naive_key.rs::derive_license_file_key`'s doc comment for the full
+/// rationale (applies identically here). `Zeroizing<T>` derefs transparently
+/// to `T`, so existing callers need no changes.
+pub fn derive_machine_file_key(license_key: &str, fingerprint: &str) -> Zeroizing<[u8; 32]> {
     let hk = Hkdf::<Sha256>::new(Some(SALT), license_key.as_bytes());
-    let mut key = [0u8; 32];
-    hk.expand(fingerprint.as_bytes(), &mut key)
+    let mut key = Zeroizing::new([0u8; 32]);
+    hk.expand(fingerprint.as_bytes(), &mut key[..])
         .expect("32 bytes is a valid HKDF-SHA256 output length (max is 255*32)");
     key
 }
@@ -56,6 +63,14 @@ mod tests {
             derive_machine_file_key("lk", "fp-a"),
             derive_machine_file_key("lk", "fp-b")
         );
+    }
+
+    #[test]
+    fn returns_a_zeroizing_wrapper_not_a_bare_array() {
+        // Type-level proof the zeroize-on-drop guarantee actually applies —
+        // see naive_key.rs's identical test for the full rationale.
+        let key: zeroize::Zeroizing<[u8; 32]> = derive_machine_file_key("lk", "fp");
+        assert_eq!(key.len(), 32);
     }
 
     #[test]
