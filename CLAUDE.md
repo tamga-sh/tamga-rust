@@ -12,15 +12,20 @@ turn rather than re-implementing signature verification per language. Every cryp
 protocol-parsing mistake made here propagates to three other SDKs — see the GOTCHAS section below
 before touching anything in `src/crypto/` or `src/checkout/`.
 
-Plans: [`docs/plans/tamga-rust.plan.md`](docs/plans/tamga-rust.plan.md) (this repo's implementation
-plan — Section A is the scaffold, B–M are the real feature work). Protocol spec:
+Plans: [`../docs/plans/tamga-rust.plan.md`](../docs/plans/tamga-rust.plan.md) (this repo's
+implementation plan — Section A is the scaffold, B–M are the real feature work; lives one directory
+up, in the sibling `tamga-sdk` monorepo, not inside this repo). Protocol spec:
 [`docs/sdk.md`](../../tamga-api/docs/sdk.md) in `tamga-api` — the authoritative source for every
 field name, endpoint, and enum value this crate implements against. Where the plan and `docs/sdk.md`
 disagree, `docs/sdk.md` wins; it's generated from the running server, not from `docs/plans/`.
 
-**Current state: scaffold only.** Every file under `src/` is a doc-comment stub with no real logic.
-Do not assume any endpoint method, model field, or crypto function actually works — check the plan's
-checkbox state (`- [x]` vs `- [ ]`) before relying on anything beyond module wiring.
+**Current state: Sections A–L implemented and tested** (client/transport, license
+validation/check-in/checkout, machine checkout/management/offline proof, components/processes,
+entitlements, error model). Sections E, F, and H (all cryptographic code) have each passed a
+dedicated `security-reviewer` pass — read the GOTCHAS section below before touching anything in
+`src/crypto/` or `src/checkout/` regardless. Published on crates.io as `tamga` (v0.1.1), with real
+CI/release automation exercised end-to-end. Check the plan's checkbox state (`- [x]` vs `- [ ]`)
+for exact per-item status before assuming a specific method or field is done.
 
 ## Architecture
 
@@ -161,7 +166,7 @@ acts as a drift canary if a future dependency bump ever flips `preserve_order` o
   (notably the base64-string-vs-decoded-bytes gotcha above), which a hand-built fixture matching this
   SDK's own assumptions cannot catch.
 - **Sections E, F, and H (`src/crypto/`, `src/checkout/`, `src/proof.rs`) require a
-  `security-reviewer` pass before merge** — see `docs/plans/tamga-rust.plan.md` §4 (Quality Gates).
+  `security-reviewer` pass before merge** — see `../docs/plans/tamga-rust.plan.md` §4 (Quality Gates).
   Do not batch multiple crypto sections into one PR; each covers materially different primitives.
 
 ## Branch & Commit Convention
