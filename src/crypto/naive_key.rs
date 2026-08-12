@@ -19,13 +19,24 @@
 //! key_bytes[..len].copy_from_slice(&kb[..len]);
 //! ```
 
+use zeroize::Zeroizing;
+
 /// Derives the AES-256-GCM key for an encrypted `.lic` file: `license_key`'s
 /// raw UTF-8 bytes, zero-padded (if shorter than 32 bytes) or truncated (if
 /// longer) to exactly 32 bytes. Deliberately **not** a hash or KDF — see
 /// module doc comment.
-pub fn derive_license_file_key(license_key: &str) -> [u8; 32] {
+///
+/// Returns [`Zeroizing<[u8; 32]>`] rather than a bare array so the derived
+/// key material is wiped from memory when it goes out of scope, instead of
+/// sitting in freed-but-unzeroed memory indefinitely. `Zeroizing<T>`
+/// transparently derefs to `T` (here `[u8; 32]`), so existing callers that
+/// borrow it (e.g. `aes_gcm::decrypt(&key, ...)`) need no changes. This does
+/// not, and cannot, extend to the caller-supplied `license_key: &str` itself
+/// — the SDK doesn't own that string's lifetime or storage, only the key it
+/// derives from it.
+pub fn derive_license_file_key(license_key: &str) -> Zeroizing<[u8; 32]> {
     let kb = license_key.as_bytes();
-    let mut key_bytes = [0u8; 32];
+    let mut key_bytes = Zeroizing::new([0u8; 32]);
     let len = kb.len().min(32);
     key_bytes[..len].copy_from_slice(&kb[..len]);
     key_bytes
@@ -46,14 +57,24 @@ mod tests {
     fn truncates_keys_longer_than_32_bytes() {
         let long_key = "a".repeat(50);
         let key = derive_license_file_key(&long_key);
-        assert_eq!(key, [b'a'; 32]);
+        assert_eq!(*key, [b'a'; 32]);
     }
 
     #[test]
     fn exact_32_byte_key_is_unchanged() {
         let exact = "a".repeat(32);
         let key = derive_license_file_key(&exact);
-        assert_eq!(key, [b'a'; 32]);
+        assert_eq!(*key, [b'a'; 32]);
+    }
+
+    #[test]
+    fn returns_a_zeroizing_wrapper_not_a_bare_array() {
+        // Type-level proof that the zeroize-on-drop guarantee actually
+        // applies to this function's return value -- if this function's
+        // signature ever regresses back to a bare [u8; 32], this fails to
+        // compile rather than silently losing the zeroize guarantee.
+        let key: zeroize::Zeroizing<[u8; 32]> = derive_license_file_key("check-the-type");
+        assert_eq!(key.len(), 32);
     }
 
     #[test]
