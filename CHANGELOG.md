@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3](https://github.com/tamga-sh/tamga-rust/compare/v0.1.2...v0.1.3) - 2026-08-11
+
+
+## [0.1.2](https://github.com/tamga-sh/tamga-rust/compare/v0.1.1...v0.1.2) - 2026-08-11
+
+### Documentation
+
+- Add community health files (CoC, PR template, CODEOWNERS, SECURITY, dependabot, editorconfig) (d59c30d)
+
+
+
 ## [0.1.1](https://github.com/tamga-sh/tamga-rust/compare/v0.1.0...v0.1.1) - 2026-08-11
 
 ### Bug Fixes
