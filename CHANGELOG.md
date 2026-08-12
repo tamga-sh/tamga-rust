@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4](https://github.com/tamga-sh/tamga-rust/compare/v0.1.3...v0.1.4) - 2026-08-12
+
+### Documentation
+
+- Fix stale scaffold-only status and docs/plans path in CLAUDE.md (507727c)
+
+
+
 ## [0.1.3](https://github.com/tamga-sh/tamga-rust/compare/v0.1.2...v0.1.3) - 2026-08-11
 
 
