@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0](https://github.com/tamga-sh/tamga-rust/compare/v0.1.5...v0.2.0) - 2026-08-13
+
+### Features
+
+- [**breaking**] SDK v2 security contract — license-file HKDF, offline format v2, HTTP 429 handling (6605fe6)
+
+
+
 ## [0.1.5](https://github.com/tamga-sh/tamga-rust/compare/v0.1.4...v0.1.5) - 2026-08-12
 
 ### Bug Fixes
