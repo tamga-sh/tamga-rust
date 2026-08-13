@@ -28,6 +28,10 @@ blocking = []
 # `default-features = false` so the `rustls-tls`/`native-tls` crate features above
 # actually select the TLS backend instead of reqwest's own default (native-tls).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# `time` only, for the rate-limit backoff sleep. reqwest already requires tokio,
+# so this pulls in nothing new — it just makes the dependency explicit instead
+# of reaching through another crate's tree.
+tokio = { version = "1", default-features = false, features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
@@ -49,7 +53,7 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
-# Zeroizes derived symmetric keys on drop (naive_key.rs, hkdf.rs) so key
+# Zeroizes derived symmetric keys on drop (hkdf.rs) so key
 # material doesn't sit in memory longer than necessary. Zero-dependency,
 # RustCrypto-maintained, MIT/Apache-2.0 -- the de facto standard for this
 # in the Rust crypto ecosystem, already a near-universal transitive

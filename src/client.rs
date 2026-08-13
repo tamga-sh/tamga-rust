@@ -50,11 +50,25 @@ pub struct ClientConfig {
     pub timeout: std::time::Duration,
     /// Auth transport used to authenticate every request.
     pub auth: crate::transport::AuthTransport,
+    /// How many times to retry a rate-limited (`429`) request before giving
+    /// up. Zero disables automatic retries entirely.
+    ///
+    /// Only requests that are safe to repeat are retried — see
+    /// [`Client::is_retryable`].
+    pub max_retries: u32,
 }
 
 /// Default request timeout used unless overridden via
 /// [`ClientConfigBuilder::timeout`].
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Default number of retries for a rate-limited request.
+///
+/// Three is enough to ride out a short burst without turning a sustained 429
+/// into a request that hangs for minutes. The server's auth-endpoint budget is
+/// tight (5 req/s by default), and a heartbeat timer plus a retry loop reaches
+/// it easily — which is exactly the case this exists for.
+const DEFAULT_MAX_RETRIES: u32 = 3;
 
 impl ClientConfig {
     /// Starts building a [`ClientConfig`] with the two always-required
@@ -67,6 +81,7 @@ impl ClientConfig {
             api_version: crate::transport::DEFAULT_API_VERSION.to_string(),
             timeout: DEFAULT_TIMEOUT,
             auth: None,
+            max_retries: DEFAULT_MAX_RETRIES,
         }
     }
 
@@ -99,6 +114,7 @@ pub struct ClientConfigBuilder {
     api_version: String,
     timeout: std::time::Duration,
     auth: Option<crate::transport::AuthTransport>,
+    max_retries: u32,
 }
 
 impl ClientConfigBuilder {
@@ -141,7 +157,17 @@ impl ClientConfigBuilder {
             auth: self
                 .auth
                 .expect("ClientConfigBuilder::auth must be called before build()"),
+            max_retries: self.max_retries,
         }
+    }
+
+    /// Override how many times a rate-limited request is retried.
+    ///
+    /// Set to `0` to handle `429` yourself — the error carries the
+    /// server-supplied `Retry-After` so you can schedule your own backoff.
+    pub fn max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = retries;
+        self
     }
 }
 
@@ -195,6 +221,109 @@ impl Client {
         builder
     }
 
+    /// Is this request safe to repeat after a `429`?
+    ///
+    /// `GET` always is. Among the `POST`s only the licensing *actions* are —
+    /// they are effectively idempotent (validate, check in/out, ping a
+    /// heartbeat), and they are precisely the calls a client makes on a timer,
+    /// so they are the ones that hit the rate limit in the first place.
+    ///
+    /// Creates are deliberately excluded. Retrying `POST /machines` after a
+    /// timeout-shaped failure risks a second activation burning a second seat,
+    /// and only the caller knows whether that is acceptable.
+    fn is_retryable(method: &reqwest::Method, path: &str) -> bool {
+        if method == reqwest::Method::GET {
+            return true;
+        }
+        method == reqwest::Method::POST
+            && [
+                "/actions/validate",
+                "/actions/validate-key",
+                "/actions/check-in",
+                "/actions/check-out",
+                "/actions/ping",
+            ]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+    }
+
+    /// How long to wait before retry number `attempt` (0-based).
+    ///
+    /// Prefers the server's `Retry-After` when present — it knows when the
+    /// bucket refills and guessing wastes the budget. Otherwise exponential
+    /// backoff with jitter, because a fleet of clients that all retry on the
+    /// same schedule reconverges into the same spike it was backing off from.
+    fn retry_delay(attempt: u32, retry_after: Option<u64>) -> std::time::Duration {
+        if let Some(secs) = retry_after {
+            // Cap it: a hostile or misconfigured proxy must not be able to
+            // park the caller for an hour.
+            return std::time::Duration::from_secs(secs.min(60));
+        }
+        let base = 1u64 << attempt.min(5); // 1, 2, 4, 8, 16, 32 seconds
+        let jitter = crate::transport::jitter_millis(attempt);
+        std::time::Duration::from_millis(base * 1000 + jitter)
+    }
+
+    /// Parse `Retry-After` as delta-seconds. HTTP-date form is ignored — the
+    /// server sends seconds, and misreading a date as a duration would be far
+    /// worse than falling back to backoff.
+    fn parse_retry_after(response: &reqwest::Response) -> Option<u64> {
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)?
+            .to_str()
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    }
+
+    /// Expose [`Self::retry_delay`] to integration tests.
+    ///
+    /// The delay policy is worth asserting directly: the alternative is a test
+    /// that actually waits, which is either slow or meaningless.
+    #[doc(hidden)]
+    pub fn retry_delay_for_test(attempt: u32, retry_after: Option<u64>) -> std::time::Duration {
+        Self::retry_delay(attempt, retry_after)
+    }
+
+    /// Send a request, transparently retrying while the server answers `429`.
+    ///
+    /// Returns the first non-429 response, or the last 429 once the retry
+    /// budget is spent — the caller then turns it into a
+    /// [`crate::TamgaError::RateLimited`] carrying `Retry-After`.
+    async fn send_with_retry(
+        &self,
+        builder: reqwest::RequestBuilder,
+        method: &reqwest::Method,
+        path: &str,
+    ) -> Result<reqwest::Response, crate::TamgaError> {
+        let retryable = Self::is_retryable(method, path);
+        let mut attempt = 0u32;
+
+        loop {
+            // `try_clone` fails only for streaming bodies, which this client
+            // never sends; if it ever did, not retrying is the safe answer.
+            let this_try = match builder.try_clone() {
+                Some(b) => b,
+                None => return builder.send().await.map_err(crate::TamgaError::Http),
+            };
+
+            let response = this_try.send().await?;
+
+            if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
+                || !retryable
+                || attempt >= self.config.max_retries
+            {
+                return Ok(response);
+            }
+
+            let delay = Self::retry_delay(attempt, Self::parse_retry_after(&response));
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+        }
+    }
+
     /// Sends a JSON:API request (`Content-Type: application/vnd.api+json`,
     /// optional JSON body) and deserializes a `{ data: T }` envelope on
     /// success, or a typed [`crate::TamgaError`] (see
@@ -212,12 +341,12 @@ impl Client {
         }
 
         let mut builder = self
-            .request(method, path, otp)
+            .request(method.clone(), path, otp)
             .header(reqwest::header::CONTENT_TYPE, "application/vnd.api+json");
         if let Some(body) = body {
             builder = builder.json(&body);
         }
-        let response = builder.send().await?;
+        let response = self.send_with_retry(builder, &method, path).await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -246,12 +375,12 @@ impl Client {
         }
 
         let mut builder = self
-            .request(method, path, otp)
+            .request(method.clone(), path, otp)
             .header(reqwest::header::CONTENT_TYPE, "application/vnd.api+json");
         if let Some(body) = body {
             builder = builder.json(&body);
         }
-        let response = builder.send().await?;
+        let response = self.send_with_retry(builder, &method, path).await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -268,7 +397,8 @@ impl Client {
         path: &str,
         otp: Option<&str>,
     ) -> Result<T, crate::TamgaError> {
-        let response = self.request(method, path, otp).send().await?;
+        let builder = self.request(method.clone(), path, otp);
+        let response = self.send_with_retry(builder, &method, path).await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -284,6 +414,16 @@ impl Client {
     /// swallow the failure.
     async fn api_error(response: reqwest::Response) -> crate::TamgaError {
         let status = response.status();
+
+        // Surfaced as its own variant rather than folded into the generic API
+        // error: a caller that cannot tell "you are going too fast, wait N
+        // seconds" from "your credential is wrong" will retry the second one
+        // forever and give up on the first.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = Self::parse_retry_after(&response);
+            return crate::TamgaError::RateLimited { retry_after };
+        }
+
         let json_api_error = match response.json::<crate::error::JsonApiErrorDocument>().await {
             Ok(doc) => {
                 doc.errors
