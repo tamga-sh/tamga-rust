@@ -84,13 +84,16 @@ Pulled from `docs/sdk.md` → "Known Server-Side Gaps", filtered to what actuall
 Read the full list there before scoping new SDK work — most of it (Analytics, EE Environments/Event
 Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
 
-- **Do not implement the upgrade-check endpoint.** `GET /releases/actions/upgrade` crashes at
-  runtime server-side (joins a table that doesn't exist) — not a v1 deliverable, not even a stub
-  worth wiring up. If asked to add "check for updates," point back to this gotcha instead.
-- **No client-side 429/backoff handling.** `429 TOO_MANY_REQUESTS` is declared in the server's error
-  enum but has no constructor and is never returned by any code path today. Building retry/backoff
-  logic keyed on it would be dead code that only fires under a future server change nobody has
-  scheduled.
+- **The upgrade-check endpoint works now.** `GET /releases/actions/upgrade` used to 500 on every
+  call — its query selected seven columns `releases` never had and joined three tables that were
+  never created. That is fixed server-side. An expired licence gets `204 No Content` rather than a
+  denial when its policy says it has stopped receiving new builds, so treat 204 as "you are current"
+  and not as an error.
+- **429 is live; handle it.** Credential-accepting endpoints run on a per-IP budget (5 req/s by
+  default) that a heartbeat timer reaches easily. `TamgaError::RateLimited` carries the server's
+  `Retry-After`. Safe requests (`GET`, plus the licensing `actions/*` `POST`s) retry automatically
+  with capped backoff; creates deliberately do not, because repeating an activation can burn a
+  second seat.
 - **Model all 24 `ValidationCode` variants, but only 14 are live.** `VALID` through `TOO_MANY_USES`
   (14 values) are reachable. `NOT_FOUND` is declared but never emitted — the handler short-circuits
   to HTTP 404 instead. The remaining 9 (`BANNED`, `ENTITLEMENTS_MISSING`, `TOO_MANY_USERS`,
@@ -98,14 +101,16 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`, `VERSION_SCOPE_MISMATCH`) are wired into
   the enum for forward-compatibility but never actually returned. Use `#[serde(other)]` so a future
   server-side addition doesn't hard-fail deserialization.
-- **`ScopeObject` has 8 fields; only 4 are enforced.** `product`, `policy`, `user`, `environment` are
-  checked server-side. `entitlements`, `fingerprint`, `version`, `checksum` are parsed and silently
-  ignored. Keep all 8 in the request builder (forward-compatible), but the doc comments must not
-  claim the unenforced 4 actually constrain anything today.
-- **Auth is not enforced on license/machine endpoints.** No `AuthContext` extractor runs on any
-  handler under those slices server-side. Always send `Authorization: License <key>` (or another
-  configured transport) anyway — it's forward-compatible with enforcement landing later, and costs
-  nothing today. Do not build a code path that assumes a bad/missing credential gets rejected.
+- **`ScopeObject` has 8 fields; 6 are enforced and 2 are refused.** `product`, `policy`, `user`,
+  `environment`, `fingerprint` and `entitlements` are all checked server-side now. `version` and
+  `checksum` return `422 SCOPE_NOT_SUPPORTED` — deliberately, because neither has anything
+  server-side to compare against, and a scope that silently passes is worse than one that is
+  missing: it gets relied on.
+- **Auth is enforced everywhere.** A missing credential is `401`, an insufficient one `403`; the two
+  are distinct states and must not be conflated in error handling. A licence key is scoped to its
+  own licence — validating or checking out someone else's returns `403`. Authenticating with a
+  licence key also requires the policy's `authentication_strategy` to be `LICENSE` or `MIXED`; the
+  default `TOKEN` yields `401 LICENSE_NOT_ALLOWED`, which is a provisioning matter, not an SDK bug.
 - **Policy defaults reference non-existent enum variants.** Freshly-created policies report
   `overage_strategy: "DENY_ACCESS"` and `heartbeat_resurrection_strategy: "NO_RESURRECTION"` — neither
   is a real variant of `OverageStrategy`/`HeartbeatResurrectionStrategy`. Both silently behave as

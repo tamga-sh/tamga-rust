@@ -10,9 +10,18 @@
 //! -----END LICENSE FILE-----
 //! ```
 //!
-//! `alg` is exactly `"base64+ed25519"` (plain) or `"aes-256-gcm+ed25519"`
-//! (encrypted) — **Ed25519 only** for the checkout signature, independent of
-//! the license's own key `scheme`.
+//! `alg` is exactly `"base64+ed25519+v2"` (plain) or
+//! `"aes-256-gcm+ed25519+v2"` (encrypted) — **Ed25519 only** for the checkout
+//! signature, independent of the license's own key `scheme`.
+//!
+//! **Format v2 and why v1 is refused outright.** In v1 the `ttl`/`expiry` a
+//! caller asked for lived only in the JSON:API envelope *around* the
+//! certificate, never inside the signed bytes. A 24-hour trial file was
+//! therefore cryptographically valid forever: the client is the attacker, so
+//! any check built on the envelope is bypassed by keeping — or
+//! redistributing — the raw `certificate` string. v2 moves the claims inside
+//! the signature. Accepting both formats would give that back, so a file whose
+//! `alg` does not end in `+v2` is rejected.
 //!
 //! **Verification flow** an implementation must follow (see
 //! `docs/plans/tamga-rust.plan.md` §E):
@@ -24,10 +33,12 @@
 //!    `src/crypto/ed25519.rs`) using the account's public Ed25519 key.
 //! 5. Base64-decode `enc`.
 //! 6. If `alg` contains `aes-256-gcm`: split `nonce(12B) ‖ ciphertext ‖
-//!    tag(16B)`, AES-256-GCM-open with the key from
-//!    `src/crypto/naive_key.rs` (derived from the license key string, zero-
-//!    padded/truncated to 32 bytes — not a hash or KDF).
-//! 7. Parse the resulting bytes as `{"data": <LicenseResource>}`.
+//!    tag(16B)`, AES-256-GCM-open with
+//!    `crypto::hkdf::derive_license_file_key` (HKDF-SHA256, salt
+//!    `"tamga:license-file-key-v1"`, info `"license-file"`).
+//! 7. Parse the resulting bytes as `{"data": <LicenseResource>, "meta": <claims>}`.
+//! 8. **Enforce `meta.exp`.** Steps 1–7 only establish that the file is
+//!    authentic; without this step v2 buys nothing over v1.
 //!
 //! Also documented here (doc comments only, not enforced by code yet):
 //! - `includes` on the checkout response is **always `[]`** — there is no
@@ -36,10 +47,9 @@
 //! - `id` is a fresh UUIDv7 per call, **not idempotent** — calling checkout
 //!   twice yields two different certificates (different signature nonce for
 //!   the encrypted variant).
-//! - `ttl`/`expiry` are **metadata only, not embedded in the signed
-//!   payload**, and are **not re-checked by the server on any later
-//!   validation** — expiry enforcement for an offline file is entirely this
-//!   SDK's/caller's responsibility on the client side.
+//! - The envelope's `ttl`/`expiry` fields are still metadata and still must
+//!   not be trusted; the authoritative expiry is `meta.exp` inside the signed
+//!   payload, which this module enforces.
 //!
 //! Intended public API: `verify_license_file(pem: &str, ed25519_pubkey:
 //! &[u8; 32], license_key: Option<&str>) -> Result<LicenseResource,
@@ -70,7 +80,7 @@ pub struct LicenseFile {
     /// The PEM-wrapped `.lic` certificate string — pass to
     /// [`verify_license_file`].
     pub certificate: String,
-    /// `"base64+ed25519"` or `"aes-256-gcm+ed25519"`, matching
+    /// `"base64+ed25519+v2"` or `"aes-256-gcm+ed25519+v2"`, matching
     /// `certificate`'s inner `alg` field.
     pub algorithm: String,
     /// **Always `[]`** — there is no working `include[]` param despite this
@@ -97,11 +107,49 @@ struct CertPayload {
     alg: String,
 }
 
-/// `{"data": <LicenseResource>}` — what `enc` decodes/decrypts to.
+/// `{"data": <LicenseResource>, "meta": <claims>}` — what `enc`
+/// decodes/decrypts to in format v2.
 #[derive(Debug, serde::Deserialize)]
 struct DataPayload {
     data: crate::models::license::LicenseResource,
+    meta: LicenseFileClaims,
 }
+
+/// The claims carried *inside* the signed bytes.
+///
+/// These are the point of format v2. Everything here is covered by the
+/// signature, so unlike the response envelope it cannot be edited by whoever
+/// holds the file.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LicenseFileClaims {
+    /// Issued-at, seconds since the Unix epoch.
+    pub iat: i64,
+    /// Expiry, seconds since the Unix epoch. Absent means the file never
+    /// expires (checkout was made without a `ttl`).
+    #[serde(default)]
+    pub exp: Option<i64>,
+    /// Unique per checkout — usable for replay detection.
+    pub jti: String,
+    /// Identifies the signing key, so a file survives a key rotation.
+    pub kid: String,
+}
+
+/// A verified licence file: the resource plus the claims that were signed
+/// alongside it.
+#[derive(Debug, Clone)]
+pub struct VerifiedLicenseFile {
+    /// The licence the file describes.
+    pub license: crate::models::license::LicenseResource,
+    /// The claims that were covered by the signature.
+    pub claims: LicenseFileClaims,
+}
+
+/// How much clock skew to tolerate when checking `exp`.
+///
+/// Deliberately small. The client's clock is under the attacker's control, so
+/// a generous allowance is just a free extension of every expired file; this
+/// covers ordinary NTP drift and nothing more.
+const CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
 
 /// Parses and fully verifies a `.lic` file (from either
 /// [`crate::Client::check_out_license`]'s raw PEM string or
@@ -123,6 +171,47 @@ pub fn verify_license_file(
     ed25519_pubkey: &[u8; 32],
     license_key: Option<&str>,
 ) -> Result<crate::models::license::LicenseResource, crate::error::CheckoutError> {
+    verify_license_file_with_claims(pem, ed25519_pubkey, license_key).map(|v| v.license)
+}
+
+/// As [`verify_license_file`], also returning the signed claims.
+///
+/// Use this when you want `jti` for replay detection or `kid` for key-rotation
+/// bookkeeping. Expiry is enforced either way — it is not opt-in.
+pub fn verify_license_file_with_claims(
+    pem: &str,
+    ed25519_pubkey: &[u8; 32],
+    license_key: Option<&str>,
+) -> Result<VerifiedLicenseFile, crate::error::CheckoutError> {
+    verify_license_file_at(pem, ed25519_pubkey, license_key, unix_now())
+}
+
+/// Current wall-clock time as a Unix timestamp.
+///
+/// `chrono` is built here without its `clock` feature on purpose (the SDK does
+/// not want a system-time dependency in its default build), so this reads the
+/// clock directly. A clock set before the epoch yields 0, which fails every
+/// expiry check closed rather than open.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// As [`verify_license_file_with_claims`], with the current time supplied by
+/// the caller.
+///
+/// Two uses. Tests get determinism. And an application that keeps a
+/// server-supplied timestamp — the recommended defence against a user winding
+/// the system clock back to revive an expired file — can pass that instead of
+/// trusting the local clock.
+pub fn verify_license_file_at(
+    pem: &str,
+    ed25519_pubkey: &[u8; 32],
+    license_key: Option<&str>,
+    now_unix: i64,
+) -> Result<VerifiedLicenseFile, crate::error::CheckoutError> {
     use base64::Engine as _;
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -150,10 +239,10 @@ pub fn verify_license_file(
         .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
 
     let plaintext = match cert.alg.as_str() {
-        "base64+ed25519" => enc_bytes,
-        "aes-256-gcm+ed25519" => {
+        "base64+ed25519+v2" => enc_bytes,
+        "aes-256-gcm+ed25519+v2" => {
             let key_str = license_key.ok_or(crate::error::CheckoutError::LicenseKeyMissing)?;
-            let key = crate::crypto::naive_key::derive_license_file_key(key_str);
+            let key = crate::crypto::hkdf::derive_license_file_key(key_str);
             // nonce(12B) ‖ ciphertext ‖ tag(16B) — at least 28 bytes even
             // for an empty plaintext.
             if enc_bytes.len() < 12 + 16 {
@@ -173,7 +262,20 @@ pub fn verify_license_file(
     };
 
     let payload: DataPayload = serde_json::from_slice(&plaintext)?;
-    Ok(payload.data)
+
+    // The signature proves the file is authentic. It does not prove it is
+    // still valid — that is this check, and skipping it is what made v1 files
+    // permanent.
+    if let Some(exp) = payload.meta.exp {
+        if now_unix - CLOCK_SKEW_TOLERANCE_SECS > exp {
+            return Err(crate::error::CheckoutError::Expired { exp });
+        }
+    }
+
+    Ok(VerifiedLicenseFile {
+        license: payload.data,
+        claims: payload.meta,
+    })
 }
 
 #[cfg(test)]
@@ -182,6 +284,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use rand::RngCore;
+
+    const B64_TEST: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
     fn gen_keypair() -> ([u8; 32], SigningKey) {
         let mut secret = [0u8; 32];
@@ -203,7 +307,7 @@ mod tests {
         const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
         let (enc, alg) = match encryption_key {
-            None => (B64.encode(payload_json.as_bytes()), "base64+ed25519"),
+            None => (B64.encode(payload_json.as_bytes()), "base64+ed25519+v2"),
             Some(key) => {
                 use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
                 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
@@ -214,7 +318,7 @@ mod tests {
                 let ciphertext_and_tag = cipher.encrypt(&nonce, payload_json.as_bytes()).unwrap();
                 let mut out = nonce_bytes.to_vec();
                 out.extend_from_slice(&ciphertext_and_tag);
-                (B64.encode(&out), "aes-256-gcm+ed25519")
+                (B64.encode(&out), "aes-256-gcm+ed25519+v2")
             }
         };
 
@@ -239,9 +343,101 @@ mod tests {
                     "machines_count": 0, "metadata": {},
                     "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
                 }
-            }
+            },
+            "meta": { "iat": 1_767_225_600, "jti": "test-jti", "kid": "test-kid" }
         })
         .to_string()
+    }
+
+    /// The same payload with an `exp` claim `offset` seconds from `iat`.
+    fn payload_json_expiring_at(exp: i64) -> String {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&representative_payload_json()).unwrap();
+        v["meta"]["exp"] = serde_json::json!(exp);
+        v.to_string()
+    }
+
+    // ── Format v2: the expiry claim ──────────────────────────────────────
+
+    #[test]
+    fn an_expired_file_is_refused_even_though_its_signature_is_valid() {
+        // The whole point of v2. In v1 the requested TTL lived only in the
+        // JSON:API envelope around the certificate, so a 24-hour trial file
+        // stayed cryptographically valid forever and the client — which is the
+        // attacker — simply kept the raw PEM.
+        let (pubkey, signing_key) = gen_keypair();
+        let exp = 1_767_225_600;
+        let pem = build_pem(&payload_json_expiring_at(exp), &signing_key, None);
+
+        let err = verify_license_file_at(&pem, &pubkey, None, exp + 3600).unwrap_err();
+        assert!(matches!(err, crate::error::CheckoutError::Expired { .. }));
+    }
+
+    #[test]
+    fn a_file_within_its_ttl_verifies() {
+        let (pubkey, signing_key) = gen_keypair();
+        let exp = 1_767_225_600;
+        let pem = build_pem(&payload_json_expiring_at(exp), &signing_key, None);
+
+        let verified = verify_license_file_at(&pem, &pubkey, None, exp - 3600).unwrap();
+        assert_eq!(verified.claims.exp, Some(exp));
+    }
+
+    #[test]
+    fn a_file_without_an_exp_claim_never_expires() {
+        // Checkout without a `ttl` produces no `exp`. That must read as
+        // perpetual, not as "expired at the epoch".
+        let (pubkey, signing_key) = gen_keypair();
+        let pem = build_pem(&representative_payload_json(), &signing_key, None);
+
+        let verified = verify_license_file_at(&pem, &pubkey, None, i64::MAX / 2).unwrap();
+        assert!(verified.claims.exp.is_none());
+    }
+
+    #[test]
+    fn clock_skew_tolerance_is_seconds_not_hours() {
+        // A generous allowance would just be a free extension on every expired
+        // file, since the clock belongs to the attacker.
+        let (pubkey, signing_key) = gen_keypair();
+        let exp = 1_767_225_600;
+        let pem = build_pem(&payload_json_expiring_at(exp), &signing_key, None);
+
+        // Just inside the tolerance.
+        assert!(verify_license_file_at(&pem, &pubkey, None, exp + 30).is_ok());
+        // Comfortably outside it.
+        assert!(verify_license_file_at(&pem, &pubkey, None, exp + 600).is_err());
+    }
+
+    #[test]
+    fn a_v1_file_is_refused_outright() {
+        use base64::Engine as _;
+        // Accepting both formats would hand back the permanent-file problem:
+        // an attacker holding any v1 certificate could keep using it forever.
+        let (pubkey, signing_key) = gen_keypair();
+        let pem = build_pem(&representative_payload_json(), &signing_key, None);
+        // Repack the same certificate with a v1 `alg`.
+        let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        let cert_json = B64_TEST.decode(body.trim()).unwrap();
+        let mut cert: serde_json::Value = serde_json::from_slice(&cert_json).unwrap();
+        cert["alg"] = serde_json::json!("base64+ed25519");
+        let repacked = B64_TEST.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        let v1_pem = format!("{PEM_HEADER}\n{repacked}\n{PEM_FOOTER}");
+
+        let err = verify_license_file(&v1_pem, &pubkey, None).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CheckoutError::UnsupportedAlgorithm(ref a) if a == "base64+ed25519"
+        ));
+    }
+
+    #[test]
+    fn the_claims_carry_a_replay_id_and_a_key_id() {
+        let (pubkey, signing_key) = gen_keypair();
+        let pem = build_pem(&representative_payload_json(), &signing_key, None);
+
+        let verified = verify_license_file_with_claims(&pem, &pubkey, None).unwrap();
+        assert!(!verified.claims.jti.is_empty());
+        assert!(!verified.claims.kid.is_empty());
     }
 
     #[test]
@@ -256,7 +452,7 @@ mod tests {
     fn verifies_a_known_good_encrypted_fixture() {
         let (pubkey, signing_key) = gen_keypair();
         let license_key = "lic-abc123";
-        let enc_key = crate::crypto::naive_key::derive_license_file_key(license_key);
+        let enc_key = crate::crypto::hkdf::derive_license_file_key(license_key);
         let pem = build_pem(&representative_payload_json(), &signing_key, Some(&enc_key));
         let license = verify_license_file(&pem, &pubkey, Some(license_key)).unwrap();
         assert_eq!(license.attributes.key, Some("lic-abc123".to_string()));
@@ -282,7 +478,7 @@ mod tests {
     fn rejects_tampered_ciphertext_aead_tag_mismatch() {
         let (pubkey, signing_key) = gen_keypair();
         let license_key = "lic-abc123";
-        let enc_key = crate::crypto::naive_key::derive_license_file_key(license_key);
+        let enc_key = crate::crypto::hkdf::derive_license_file_key(license_key);
         // Re-sign a manually tampered `enc` so signature verification
         // passes but AEAD decryption must fail — proves the AEAD tag
         // check itself, independent of signature verification.
@@ -306,7 +502,7 @@ mod tests {
         enc_bytes[last] ^= 0xff;
         let enc = B64.encode(&enc_bytes);
         let sig = B64.encode(signing_key.sign(enc.as_bytes()).to_bytes());
-        let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": "aes-256-gcm+ed25519" });
+        let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": "aes-256-gcm+ed25519+v2" });
         let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
         let pem = format!("{PEM_HEADER}\n{pem_body}\n{PEM_FOOTER}");
 

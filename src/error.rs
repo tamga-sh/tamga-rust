@@ -16,10 +16,12 @@
 //!   conflicts); `CHECK_IN_NOT_REQUIRED`, `TTL_INVALID`,
 //!   `LICENSE_NOT_ENCRYPTED`, `LICENSE_KEY_MISSING`, `SCHEME_NOT_SUPPORTED`,
 //!   `DATASET_INVALID` (422 validation failures).
-//! - `429 TOO_MANY_REQUESTS` is declared in the server's error enum but has
-//!   **no constructor and is never returned by any code path today** — do
-//!   not build client-side 429/backoff handling expecting the server to
-//!   ever send it under the current deployment.
+//! - `429 TOO_MANY_REQUESTS` is live. Credential-accepting endpoints (session
+//!   creation, password reset, licence-key validation, token minting) run on a
+//!   tight per-IP budget — 5 requests/second by default — which a heartbeat
+//!   timer reaches easily. It maps to [`TamgaError::RateLimited`], which
+//!   carries the server's `Retry-After`; the client also retries safe requests
+//!   automatically (see `ClientConfig::max_retries`).
 //! - `CHECK_IN_NOT_REQUIRED` (422) is a **caller error**, not something to
 //!   retry — callers should check `require_check_in` on the license's
 //!   policy before scheduling periodic check-ins.
@@ -48,6 +50,19 @@ pub enum TamgaError {
     /// `Result<T, TamgaError>` return slot across the crate.
     #[error("API error {code}: {detail}", code = .0.code, detail = .0.detail)]
     Api(Box<JsonApiError>),
+    /// The server answered `429 Too Many Requests` and the retry budget was
+    /// exhausted (or the request was not safe to repeat).
+    ///
+    /// `retry_after` is the server's `Retry-After` in seconds when it sent
+    /// one. Wait at least that long before trying again.
+    #[error("rate limited by the server{}", match retry_after {
+        Some(s) => format!("; retry after {s}s"),
+        None => String::new(),
+    })]
+    RateLimited {
+        /// Server-supplied `Retry-After`, in seconds.
+        retry_after: Option<u64>,
+    },
     /// `422 CHECK_IN_NOT_REQUIRED` — a **caller error**, not something to
     /// retry. Callers should check `require_check_in` on the license's
     /// policy before scheduling periodic check-ins, rather than reacting to
@@ -175,9 +190,22 @@ pub enum CheckoutError {
     #[error("invalid JSON in certificate payload: {0}")]
     InvalidJson(#[from] serde_json::Error),
     /// `alg` wasn't one of the two license-file values this SDK
-    /// understands (`"base64+ed25519"`, `"aes-256-gcm+ed25519"`).
+    /// understands (`"base64+ed25519+v2"`, `"aes-256-gcm+ed25519+v2"`).
+    ///
+    /// A v1 file (no `+v2` suffix) lands here too, and that is deliberate:
+    /// v1 carried no expiry inside the signature, so accepting one would
+    /// hand back the permanent-file problem v2 exists to close.
     #[error("unsupported algorithm: {0}")]
     UnsupportedAlgorithm(String),
+    /// The file's signed `exp` claim is in the past.
+    ///
+    /// The signature was valid — this is an authentic file that has simply
+    /// run out. Re-check out to get a fresh one.
+    #[error("license file expired at unix timestamp {exp}")]
+    Expired {
+        /// The `exp` claim, seconds since the Unix epoch.
+        exp: i64,
+    },
     /// The file's `alg` requires decryption but no `license_key` was
     /// supplied to the verify call.
     #[error("license key is required to decrypt an encrypted checkout file")]

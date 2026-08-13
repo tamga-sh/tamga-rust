@@ -276,3 +276,43 @@ mod tests {
         assert_eq!(info, ResponseInfo::default());
     }
 }
+
+/// Deterministic-per-process jitter, in milliseconds, for retry backoff.
+///
+/// A fleet of clients that all back off on exactly the same schedule
+/// reconverges into the same spike it was backing off from, so the delay needs
+/// to be spread out. This derives the spread from the process id and the
+/// attempt number rather than pulling in an RNG dependency: different processes
+/// get different offsets, which is the property that matters, and the same
+/// process stays predictable enough to reason about in a log.
+///
+/// Range is 0–999 ms, so it perturbs the delay without materially changing it.
+pub(crate) fn jitter_millis(attempt: u32) -> u64 {
+    let seed = u64::from(std::process::id())
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add(u64::from(attempt).wrapping_mul(40_503));
+    seed % 1000
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::jitter_millis;
+
+    #[test]
+    fn jitter_stays_under_a_second() {
+        for attempt in 0..10 {
+            assert!(jitter_millis(attempt) < 1000);
+        }
+    }
+
+    #[test]
+    fn jitter_varies_between_attempts() {
+        // Identical jitter on every attempt would leave a fleet re-synchronised
+        // after the first collision.
+        let values: std::collections::BTreeSet<u64> = (0..8).map(jitter_millis).collect();
+        assert!(
+            values.len() > 1,
+            "jitter must not be constant across attempts"
+        );
+    }
+}

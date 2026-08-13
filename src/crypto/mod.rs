@@ -14,19 +14,13 @@
 //!   banned `rsa` crate — RUSTSEC-2023-0071, Marvin timing attack).
 //! - [`ecdsa`] — ECDSA P-256/SHA-256 verify.
 //! - [`aes_gcm`] — AES-256-GCM decrypt, shared by both checkout file formats.
-//! - [`hkdf`] — HKDF-SHA256 key derivation (machine file encryption — a
-//!   proper KDF).
-//! - [`naive_key`] — ⚠️ non-KDF zero-pad/truncate key derivation (license
-//!   file encryption). Deliberately not a hash or KDF — see that module's
-//!   doc comment before "fixing" it.
-//!
-//! **Security review gate**: every file in this module is in scope for the
-//! mandatory `security-reviewer` passes on plan Sections E, F, and H. Do not
-//! implement real logic here without that review before merge.
+//! - [`hkdf`] — HKDF-SHA256 key derivation for both offline file types.
+//!   Licence files used a zero-pad transform before format v2; the module that
+//!   implemented it has been removed rather than deprecated, so no caller can
+//!   opt back into the weaker derivation.
 
 pub mod aes_gcm;
 pub mod ecdsa;
 pub mod ed25519;
 pub mod hkdf;
-pub mod naive_key;
 pub mod rsa;

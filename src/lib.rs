@@ -31,12 +31,15 @@
 //!
 //! ## Known Server-Side Gaps (do not build against these yet)
 //!
-//! See `docs/sdk.md` → "Known Server-Side Gaps" for full detail. Items
-//! relevant to this crate: auto-update/release-checking
-//! (`GET /releases/actions/upgrade` crashes at runtime today), RFC 9421 HTTP
-//! response signing (dead code server-side), the `Tamga-Environment` request
-//! header (planned EE feature, not read server-side), and client-side 429
-//! backoff handling (the server never returns 429 today).
+//! See `docs/sdk.md` → "Known Server-Side Gaps" for full detail. Items still
+//! relevant to this crate: RFC 9421 HTTP response signing (dead code
+//! server-side) and the `Tamga-Environment` request header (planned EE
+//! feature, not read server-side).
+//!
+//! Two entries there are now out of date and have been acted on here:
+//! `GET /releases/actions/upgrade` no longer crashes (its query referenced a
+//! table that never existed), and the server *does* rate-limit — see
+//! [`error::TamgaError::RateLimited`] and `ClientConfig::max_retries`.
 
 // Promoted from `warn` to `deny` once doc coverage across the public API
 // was complete (see `docs/plans/tamga-rust.plan.md` §L) — a genuinely
