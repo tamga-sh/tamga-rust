@@ -2,9 +2,9 @@
 //! knowledge. `src/checkout/` owns the PEM-envelope format and orchestrates
 //! calls into this module.
 //!
-//! This separation (per `docs/plans/tamga-rust.plan.md` §2) is what lets
-//! `tamga-c` re-export these primitives independently if a future C consumer
-//! wants raw verify functions without the full HTTP client.
+//! This separation is what lets `tamga-c` re-export these primitives
+//! independently if a future C consumer wants raw verify functions without the
+//! full HTTP client.
 //!
 //! Module layout:
 //!
@@ -16,8 +16,8 @@
 //! - [`aes_gcm`] — AES-256-GCM decrypt, shared by both checkout file formats.
 //! - [`hkdf`] — HKDF-SHA256 key derivation for both offline file types.
 //!   Licence files used a zero-pad transform before format v2; the module that
-//!   implemented it has been removed rather than deprecated, so no caller can
-//!   opt back into the weaker derivation.
+//!   implemented it was deleted rather than deprecated, so no caller can opt
+//!   back into the weaker derivation.
 
 pub mod aes_gcm;
 pub mod ecdsa;

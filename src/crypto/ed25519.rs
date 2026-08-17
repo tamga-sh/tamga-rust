@@ -4,22 +4,21 @@
 //! independent of the license's own `scheme`), and one of the four machine
 //! checkout (`.mach`) signature schemes.
 //!
-//! ⚠️ **Critical signing gotcha** (see `docs/plans/tamga-rust.plan.md` §E):
-//! the `.lic`/`.mach` signature is computed over the **ASCII/UTF-8 bytes of
-//! the `enc` base64 STRING itself — NOT the decoded bytes of `enc`**. A
-//! verifier that decodes `enc` first and then verifies over the decoded
-//! bytes will get a false negative against every real server-produced file.
-//! This must be caught by a dedicated negative test once implemented (see
-//! plan §E: "negative test proving decoded-bytes verification fails against
-//! a known-good fixture").
+//! ⚠️ **Critical signing gotcha**: the `.lic`/`.mach` signature is computed
+//! over the **ASCII/UTF-8 bytes of the `enc` base64 STRING itself — NOT the
+//! decoded bytes of `enc`**. A verifier that decodes `enc` first and then
+//! verifies over the decoded bytes will get a false negative against every
+//! real server-produced file. This replicates the server's own signing
+//! behaviour and is pinned by a negative test in
+//! `src/checkout/license_file.rs`
+//! (`decoded_bytes_signature_verification_fails_proving_the_string_bytes_gotcha`).
 //!
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 /// Verifies an Ed25519 `signature` over `message` using the account's raw
 /// 32-byte public key. Uses `ed25519-dalek`'s own constant-time verify
 /// primitive — never a hand-rolled byte comparison, which would risk a
-/// timing side channel (see plan §E's "Constant-time comparison audit"
-/// item).
+/// timing side channel.
 ///
 /// Callers verifying a `.lic`/`.mach` checkout file must pass `message` as
 /// the **base64 string bytes of `enc`, not `enc`'s decoded bytes** — see the

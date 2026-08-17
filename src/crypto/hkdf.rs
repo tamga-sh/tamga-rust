@@ -1,22 +1,31 @@
 //! HKDF-SHA256 key derivation for both offline file types.
 //!
-//! Machine files always used a proper KDF. License files did not: the AES key
-//! was the licence key's raw bytes zero-padded to 32, which meant an attacker
-//! holding a stolen `.lic` was not attacking a 256-bit key space but the
-//! licence key's own entropy — a dictionary attack against the AEAD tag on a
-//! `XXXX-XXXX-XXXX-XXXX`-shaped string. Format v2 fixes that; the old
-//! `naive_key` module is gone, not deprecated, because keeping it would let a
-//! caller silently opt back into the weaker derivation.
+//! Machine files always used a proper KDF. License files did not: before
+//! format v2 the AES key was the licence key's raw bytes zero-padded to 32,
+//! which meant an attacker holding a stolen `.lic` was not attacking a 256-bit
+//! key space but the licence key's own entropy — a dictionary attack against
+//! the AEAD tag on a `XXXX-XXXX-XXXX-XXXX`-shaped string. Format v2 fixes
+//! that; the old `naive_key` module was deleted rather than deprecated,
+//! because keeping it would let a caller silently opt back into the weaker
+//! derivation. Both file types now derive their key here.
 //!
-//! Parameters (see `docs/plans/tamga-rust.plan.md` §F):
+//! Parameters, license file ([`derive_license_file_key`]):
+//! - `salt = "tamga:license-file-key-v1"`
+//! - `ikm = <license key>`
+//! - `info = "license-file"`
+//! - output: 32-byte AES key
+//!
+//! Parameters, machine file ([`derive_machine_file_key`]):
 //! - `salt = "tamga:machine-file-key-v1"`
 //! - `ikm = <license key>`
 //! - `info = <machine fingerprint>`
 //! - output: 32-byte AES key
 //!
-//! Unlike license checkout's naive key derivation (key-string only), a
-//! verifier needs **both** the license key **and** the target machine's
-//! fingerprint to decrypt a machine file.
+//! The two differ in what a verifier must hold. A licence file needs only the
+//! licence key; a machine file needs **both** the licence key **and** the
+//! target machine's fingerprint, because the fingerprint is the `info` input.
+//! The distinct salts guarantee the same licence key never yields the same AES
+//! key for the two formats.
 //!
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -121,8 +130,9 @@ mod tests {
 
     #[test]
     fn returns_a_zeroizing_wrapper_not_a_bare_array() {
-        // Type-level proof the zeroize-on-drop guarantee actually applies —
-        // see naive_key.rs's identical test for the full rationale.
+        // Type-level proof the zeroize-on-drop guarantee actually applies:
+        // if the return type ever regresses to a bare `[u8; 32]` this stops
+        // compiling rather than silently dropping the wipe-on-drop.
         let key: zeroize::Zeroizing<[u8; 32]> = derive_machine_file_key("lk", "fp");
         assert_eq!(key.len(), 32);
     }

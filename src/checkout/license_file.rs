@@ -23,8 +23,7 @@
 //! the signature. Accepting both formats would give that back, so a file whose
 //! `alg` does not end in `+v2` is rejected.
 //!
-//! **Verification flow** an implementation must follow (see
-//! `docs/plans/tamga-rust.plan.md` §E):
+//! **Verification flow** an implementation must follow:
 //! 1. Strip the `-----BEGIN/END LICENSE FILE-----` PEM markers.
 //! 2. Base64-decode the body → parse the inner `{ enc, sig, alg }` JSON.
 //! 3. Base64-decode `sig`.
@@ -51,9 +50,9 @@
 //!   not be trusted; the authoritative expiry is `meta.exp` inside the signed
 //!   payload, which this module enforces.
 //!
-//! Intended public API: `verify_license_file(pem: &str, ed25519_pubkey:
-//! &[u8; 32], license_key: Option<&str>) -> Result<LicenseResource,
-//! CheckoutError>` orchestrating the full flow above.
+//! Public API: [`verify_license_file`] orchestrates the full flow above,
+//! [`verify_license_file_with_claims`] additionally returns the signed claims,
+//! and [`verify_license_file_at`] takes the current time from the caller.
 
 const PEM_HEADER: &str = "-----BEGIN LICENSE FILE-----";
 const PEM_FOOTER: &str = "-----END LICENSE FILE-----";
@@ -159,13 +158,21 @@ const CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
 /// offline — no network access required — once `ed25519_pubkey` is
 /// embedded in the calling application.
 ///
-/// `license_key` is required only for the encrypted (`aes-256-gcm+ed25519`)
-/// variant; pass `None` for a plain (`base64+ed25519`) file.
+/// `license_key` is required only for the encrypted
+/// (`aes-256-gcm+ed25519+v2`) variant; pass `None` for a plain
+/// (`base64+ed25519+v2`) file. A file whose `alg` lacks the `+v2` suffix is
+/// rejected as [`crate::error::CheckoutError::UnsupportedAlgorithm`] — there
+/// is no v1 fallback.
+///
+/// The signed `exp` claim is enforced against the system clock with a 60
+/// second skew tolerance; use [`verify_license_file_at`] to supply the time
+/// yourself.
 ///
 /// See the module doc comment for the full verification flow this
-/// implements, and `src/crypto/ed25519.rs`/`src/crypto/naive_key.rs` for
-/// the two critical gotchas (signature covers the base64 **string**, not
-/// decoded bytes; encryption key is a non-KDF zero-pad/truncate transform).
+/// implements, [`crate::crypto::ed25519`] for the signature gotcha (the
+/// signature covers the base64 **string**, not its decoded bytes), and
+/// [`crate::crypto::hkdf::derive_license_file_key`] for the encryption key
+/// derivation.
 pub fn verify_license_file(
     pem: &str,
     ed25519_pubkey: &[u8; 32],
@@ -294,10 +301,9 @@ mod tests {
         (signing_key.verifying_key().to_bytes(), signing_key)
     }
 
-    /// Builds a `.lic` PEM exactly the way the real server does (see
-    /// `tamga-api/src/shared/crypto/license_file.rs::encode_license_file`),
-    /// so these tests exercise the same wire format a real server produces
-    /// — notably signing over the base64 **string**, not decoded bytes.
+    /// Builds a `.lic` PEM exactly the way the server's own encoder does, so
+    /// these tests exercise the same wire format a real server produces —
+    /// notably signing over the base64 **string**, not decoded bytes.
     fn build_pem(
         payload_json: &str,
         signing_key: &SigningKey,
@@ -512,7 +518,7 @@ mod tests {
     #[test]
     fn decoded_bytes_signature_verification_fails_proving_the_string_bytes_gotcha() {
         // Negative test proving the SDK signs/verifies over the base64
-        // STRING, not decoded bytes — required by plan §E.
+        // STRING, not decoded bytes.
         let (pubkey, signing_key) = gen_keypair();
         let payload = representative_payload_json();
         use base64::Engine as _;

@@ -2,11 +2,11 @@
 //! files. Owns the file format; delegates actual cryptography to
 //! `src/crypto/`.
 //!
-//! Module layout (see `docs/plans/tamga-rust.plan.md` §E, §F):
+//! Module layout:
 //!
-//! - [`license_file`] — `.lic` parse + verify. Ed25519-only signature
-//!   (independent of the license's own `scheme`), naive (non-KDF) key
-//!   derivation when encrypted.
+//! - [`license_file`] — `.lic` parse + verify (format v2 only). Ed25519-only
+//!   signature (independent of the license's own `scheme`), HKDF-SHA256 key
+//!   derivation when encrypted, and enforcement of the signed `exp` claim.
 //! - [`machine_file`] — `.mach` parse + verify. Signature scheme taken from
 //!   the license's `scheme` field (Ed25519/RSA-PKCS1/RSA-PSS/ECDSA-P256;
 //!   `RSA_2048_JWT_RS256` explicitly rejected), HKDF-SHA256 key derivation
