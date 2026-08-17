@@ -130,9 +130,9 @@ mod tests {
 
     #[test]
     fn payload_json_matches_a_known_good_server_produced_fixture() {
-        // Hand-verified against the exact structure
-        // tamga-api/src/features/machines/generate_offline_proof.rs
-        // produces for these inputs (BTreeMap/alphabetical order).
+        // Hand-verified against the exact structure the Tamga API's
+        // offline-proof generator produces for these inputs
+        // (BTreeMap/alphabetical order).
         let account_id: uuid::Uuid = "01926b3e-0000-7000-8000-000000000000".parse().unwrap();
         let machine_id: uuid::Uuid = "01926b3e-1111-7000-8000-000000000000".parse().unwrap();
         let json = build_payload_json(

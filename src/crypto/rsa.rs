@@ -56,7 +56,7 @@ mod tests {
         let kp = RsaKeyPair::generate(KeySize::Rsa2048).unwrap();
         // `.public_key()` — NOT `.as_der()`, which is the PKCS8 *private*
         // key DER. This is the actual SPKI public key `UnparsedPublicKey`
-        // expects, matching `tamga-api`'s own `extract_public_key`.
+        // expects, matching the Tamga API's own `extract_public_key`.
         let spki = kp.public_key().as_ref().to_vec();
         (spki, kp)
     }

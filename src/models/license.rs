@@ -17,7 +17,7 @@ pub struct LicenseResource {
     pub attributes: LicenseAttributes,
 }
 
-/// Attributes of a [`LicenseResource`], matching `tamga-api`'s
+/// Attributes of a [`LicenseResource`], matching the Tamga API's
 /// `LicenseAttributes` field-for-field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LicenseAttributes {

@@ -12,20 +12,17 @@ turn rather than re-implementing signature verification per language. Every cryp
 protocol-parsing mistake made here propagates to three other SDKs — see the GOTCHAS section below
 before touching anything in `src/crypto/` or `src/checkout/`.
 
-Plans: [`../docs/plans/tamga-rust.plan.md`](../docs/plans/tamga-rust.plan.md) (this repo's
-implementation plan — Section A is the scaffold, B–M are the real feature work; lives one directory
-up, in the sibling `tamga-sdk` monorepo, not inside this repo). Protocol spec:
-[`docs/sdk.md`](../../tamga-api/docs/sdk.md) in `tamga-api` — the authoritative source for every
-field name, endpoint, and enum value this crate implements against. Where the plan and `docs/sdk.md`
-disagree, `docs/sdk.md` wins; it's generated from the running server, not from `docs/plans/`.
+Protocol spec: the Tamga API protocol specification is the authoritative source for every field
+name, endpoint, and enum value this crate implements against. It is generated from the running
+server, so where any other description of the wire format disagrees with it, the specification
+wins.
 
-**Current state: Sections A–L implemented and tested** (client/transport, license
+**Current state: implemented and tested** — client/transport, license
 validation/check-in/checkout, machine checkout/management/offline proof, components/processes,
-entitlements, error model). Sections E, F, and H (all cryptographic code) have each passed a
-dedicated `security-reviewer` pass — read the GOTCHAS section below before touching anything in
-`src/crypto/` or `src/checkout/` regardless. Published on crates.io as `tamga` (v0.1.1), with real
-CI/release automation exercised end-to-end. Check the plan's checkbox state (`- [x]` vs `- [ ]`)
-for exact per-item status before assuming a specific method or field is done.
+entitlements, error model. All cryptographic code has passed a dedicated `security-reviewer`
+pass — read the GOTCHAS section below before touching anything in `src/crypto/` or
+`src/checkout/` regardless. Published on crates.io as `tamga` (v0.1.1), with real CI/release
+automation exercised end-to-end.
 
 ## Architecture
 
@@ -52,15 +49,15 @@ tamga-rust/
 ```
 
 **No workspace, single crate** — this is a thin HTTP client + verifier, not a multi-slice server; it
-has no reason to split into a workspace at this scope (contrast with `tamga-api`, which is also a
-single crate but a much larger one).
+has no reason to split into a workspace at this scope (contrast with the Tamga API server, which is
+also a single crate but a much larger one).
 
 **`crypto/` holds primitives only** — no HTTP, no PEM parsing, no protocol knowledge. `checkout/`
 owns the PEM-envelope format and orchestrates calls into `crypto/`. This separation is what lets
 `tamga-c` re-export the crypto primitives independently of the full HTTP client.
 
 **`client.rs` is the single home for every endpoint method** — no `src/features/<slice>/` VSA layout
-like `tamga-api`. Split into `client/` submodules only if it exceeds ~800 lines in practice.
+like the Tamga API server. Split into `client/` submodules only if it exceeds ~800 lines in practice.
 
 ## Dev Commands
 
@@ -75,12 +72,13 @@ cargo doc --no-deps --open                                   # build + view docs
 ```
 
 No `just`, no Docker Compose, no local Postgres — this is a client SDK. Integration tests mock the
-HTTP layer (`wiremock`); they never need a live `tamga-api` instance except when regenerating
+HTTP layer (`wiremock`); they never need a live Tamga API instance except when regenerating
 `tests/fixtures/*.lic`/`*.mach` files, which do require one.
 
 ## GOTCHAS
 
-Pulled from `docs/sdk.md` → "Known Server-Side Gaps", filtered to what actually touches this repo.
+Pulled from the Tamga API protocol specification → "Known Server-Side Gaps", filtered to what
+actually touches this repo.
 Read the full list there before scoping new SDK work — most of it (Analytics, EE Environments/Event
 Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
 
@@ -162,17 +160,17 @@ acts as a drift canary if a future dependency bump ever flips `preserve_order` o
 - **Coverage gate: 80% lines**, enforced via `cargo llvm-cov nextest --fail-under-lines 80` in CI.
   Run the same command locally before opening a PR — `cargo test` alone does not check coverage.
 - Unit tests live inline (`#[cfg(test)]`) next to the code they cover. Integration tests live in
-  `tests/*.rs`, one file per plan section (`tests/license_validation.rs`,
+  `tests/*.rs`, one file per feature area (`tests/license_validation.rs`,
   `tests/checkout_license_file.rs`, etc.) and mock the HTTP layer with `wiremock` — no live server
   required.
-- `tests/fixtures/` holds known-good `.lic`/`.mach` files captured from a real `tamga-api` instance.
+- `tests/fixtures/` holds known-good `.lic`/`.mach` files captured from a real Tamga API instance.
   These must come from a real server response, not be hand-constructed — the point of these tests is
   confirming this SDK's verifier reproduces the server's *actual* signing/serialization behavior
   (notably the base64-string-vs-decoded-bytes gotcha above), which a hand-built fixture matching this
   SDK's own assumptions cannot catch.
-- **Sections E, F, and H (`src/crypto/`, `src/checkout/`, `src/proof.rs`) require a
-  `security-reviewer` pass before merge** — see `../docs/plans/tamga-rust.plan.md` §4 (Quality Gates).
-  Do not batch multiple crypto sections into one PR; each covers materially different primitives.
+- **`src/crypto/`, `src/checkout/` and `src/proof.rs` require a `security-reviewer` pass before
+  merge.** Do not batch multiple crypto areas into one PR; each covers materially different
+  primitives.
 
 ## Branch & Commit Convention
 

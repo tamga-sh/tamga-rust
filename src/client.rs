@@ -48,7 +48,8 @@
 /// Configuration for a [`Client`].
 ///
 /// Build via [`ClientConfig::builder`]. `account_id` and `host` are always
-/// required — including singleplayer mode, per `docs/sdk.md`.
+/// required — including singleplayer mode, per the Tamga API protocol
+/// specification.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Tamga account ID, always required (even in singleplayer mode).
@@ -148,8 +149,8 @@ impl ClientConfigBuilder {
     /// Sets the auth transport used to authenticate every request. Required
     /// before [`Self::build`] — there is no auth-less default, since every
     /// documented server endpoint expects credentials to be sent even where
-    /// enforcement isn't wired up yet (see `docs/sdk.md` → Known Server-Side
-    /// Gaps).
+    /// enforcement isn't wired up yet (see the Tamga API protocol
+    /// specification → Known Server-Side Gaps).
     pub fn auth(mut self, auth: crate::transport::AuthTransport) -> Self {
         self.auth = Some(auth);
         self
@@ -833,7 +834,7 @@ impl Client {
     /// **Not** JSON:API-enveloped on the request side (unlike
     /// `create_machine`) — the server's `create_component` handler expects
     /// a flat `{ machine_id, fingerprint, name, metadata }` body; this is a
-    /// real asymmetry in `tamga-api`, not an SDK oversight.
+    /// real asymmetry in the Tamga API, not an SDK oversight.
     ///
     /// Unique per `(account_id, machine_id, fingerprint)` — a duplicate
     /// fails with [`crate::TamgaError::FingerprintTaken`].

@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// Signs `enc` with the scheme-appropriate key, returning the raw
-    /// signature bytes — mirrors `tamga-api`'s `sign()` dispatch.
+    /// signature bytes — mirrors the Tamga API's `sign()` dispatch.
     fn sign_for_scheme(
         scheme: LicenseScheme,
         enc: &str,

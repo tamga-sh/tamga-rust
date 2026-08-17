@@ -1,5 +1,5 @@
 # cargo-deny configuration. Run locally with `cargo deny check`; CI runs the
-# same command in .github/workflows/ci.yml. Modeled on tamga-api's deny.toml.
+# same command in .github/workflows/ci.yml.
 
 [advisories]
 ignore = []

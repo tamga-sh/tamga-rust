@@ -34,8 +34,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # --all-targets so test-only lints aren't missed (mirrors the
-      # `just lint` vs. CI gap documented in tamga-api's CLAUDE.md).
+      # --all-targets so test-only lints aren't missed; a plain `cargo clippy`
+      # skips test and example targets.
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   deny:

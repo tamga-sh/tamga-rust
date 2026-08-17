@@ -9,7 +9,7 @@
 //! not lightweight junction/relationship records.
 
 /// The `entitlements` JSON:API resource: `{ id, type, attributes }`. Field
-/// set matches `tamga-api`'s actual full `EntitlementResource` serializer —
+/// set matches the Tamga API's actual full `EntitlementResource` serializer —
 /// confirmed the license-scoped list/get endpoints return this, not the
 /// lightweight `LicenseEntitlementResource` junction resource (which only
 /// carries `created`/`updated` timestamps).

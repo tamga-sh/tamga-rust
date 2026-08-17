@@ -20,9 +20,9 @@
 //!   is deleted immediately, no `KEEP_DEAD` equivalent.
 
 /// The `machines` JSON:API resource: `{ id, type, attributes }`. Field set
-/// matches `tamga-api`'s actual `MachineResource`/`MachineAttributes`
-/// serializer (`src/features/machines/serializer.rs`) — no `relationships`
-/// object, same as [`crate::models::license::LicenseResource`].
+/// matches the Tamga API's actual `MachineResource`/`MachineAttributes`
+/// serializer — no `relationships` object, same as
+/// [`crate::models::license::LicenseResource`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MachineResource {
     /// UUIDv7 machine ID.
@@ -34,7 +34,7 @@ pub struct MachineResource {
     pub attributes: MachineAttributes,
 }
 
-/// Attributes of a [`MachineResource`], matching `tamga-api`'s
+/// Attributes of a [`MachineResource`], matching the Tamga API's
 /// `MachineAttributes` field-for-field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MachineAttributes {
@@ -149,7 +149,7 @@ mod heartbeat_status_tests {
 }
 
 /// The `components` JSON:API resource: `{ id, type, attributes }`. Field
-/// set matches `tamga-api`'s actual `ComponentResource`/`ComponentAttributes`
+/// set matches the Tamga API's actual `ComponentResource`/`ComponentAttributes`
 /// serializer — no `relationships` object, same pattern as the other
 /// resources in this crate.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -181,7 +181,7 @@ pub struct ComponentAttributes {
 }
 
 /// The `processes` JSON:API resource: `{ id, type, attributes }`. Field set
-/// matches `tamga-api`'s actual `ProcessResource`/`ProcessAttributes`
+/// matches the Tamga API's actual `ProcessResource`/`ProcessAttributes`
 /// serializer.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProcessResource {
