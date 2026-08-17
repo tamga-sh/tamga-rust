@@ -1,23 +1,12 @@
-# tamga-rust
+# tamga
 
 [![Crates.io](https://img.shields.io/crates/v/tamga.svg)](https://crates.io/crates/tamga)
 [![docs.rs](https://img.shields.io/docsrs/tamga)](https://docs.rs/tamga)
 [![CI](https://github.com/tamga-sh/tamga-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/tamga-sh/tamga-rust/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Official Rust SDK for [Tamga](https://tamga.sh). Integrate license
-activation, offline verification, and machine management into your Rust
-applications.
-
-> **Status: Sections A–L implemented and tested** (client/transport,
-> license validation/check-in/checkout, machine checkout/management/offline
-> proof, components/processes, entitlements, error model). Sections E, F,
-> and H (all cryptographic code) have each passed a dedicated
-> `security-reviewer` pass. Not yet done:
-> Section M (CI/release automation hasn't been exercised against a real CI
-> run yet) and capturing real `tests/fixtures/*.lic`/`*.mach` files from a
-> live server (current tests generate fixtures in-process against the
-> documented wire format instead).
+Official Rust SDK for Tamga. Integrate license activation, offline
+verification, and machine management into your Rust applications.
 
 ## Install
 
@@ -25,109 +14,234 @@ applications.
 cargo add tamga
 ```
 
-Published on [crates.io](https://crates.io/crates/tamga) as the bare name
-`tamga` — see [`docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
-in `tamga-api` for the full cross-SDK naming rationale.
+The crate is published under the bare name `tamga`. It targets Rust 1.75 or
+later (`rust-version` in `Cargo.toml`, pinned by a dedicated MSRV job in CI).
+
+TLS backend is selectable: `rustls-tls` is on by default, `native-tls` is
+available instead.
+
+```toml
+[dependencies]
+tamga = { version = "0.2", default-features = false, features = ["native-tls"] }
+```
 
 ## Quickstart
 
-See also `examples/validate_license.rs` for a complete, runnable version of
-this.
-
-```rust,ignore
+```rust
+use tamga::models::validation::ValidationCode;
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ClientConfig::builder("your-account-id", "api.tamga.sh")
+    let config = ClientConfig::builder("YOUR-ACCOUNT-ID", "api.tamga.sh")
         .auth(AuthTransport::License("YOUR-LICENSE-KEY".to_string()))
         .build();
 
     let client = Client::new(config)?;
 
-    // Validate a license by its raw key.
     let result = client.validate_by_key("YOUR-LICENSE-KEY", None).await?;
 
     match result.meta.code {
-        tamga::models::validation::ValidationCode::Valid => {
-            println!("license is valid");
-        }
-        other => {
-            println!("license is not valid: {other:?}");
-        }
+        ValidationCode::Valid => println!("license is valid"),
+        other => println!("license is not valid: {other:?} ({})", result.meta.detail),
     }
 
     Ok(())
 }
 ```
 
+`ClientConfig::builder` takes the account ID and the API host; `auth` is
+required and `build` panics without it. `examples/validate_license.rs` is a
+runnable version of the above, and `examples/verify_license_file.rs` covers
+the offline path.
+
+Activating a machine is a create-then-validate flow, because no seat limit is
+checked at creation time — `Client::activate_machine` composes it and deletes
+the machine row again if validation comes back over the limit:
+
+```rust
+use tamga::client::CreateMachineOptions;
+
+let result = client
+    .activate_machine(
+        license_id,
+        "machine-fingerprint",
+        CreateMachineOptions::default(),
+        None, // optional validation scope
+        true, // delete the new machine again if the licence is over its limit
+    )
+    .await?;
+
+println!("activation outcome: {:?}", result.meta.code);
+```
+
+## Auth transports
+
+`AuthTransport` covers four of the server's five accepted transports
+(`src/transport.rs`). `Cookie: Tamga-Session=<uuid>` is deliberately not
+implemented — it is browser/portal-only and needs a matching `Origin` header.
+
+```rust
+use tamga::transport::{AuthTransport, BasicAuth};
+
+// Authorization: License <key> — primary transport for embedded/client apps.
+let license = AuthTransport::License("XXXX-XXXX-XXXX-XXXX".to_string());
+
+// Authorization: Bearer <token> — default for server-side and CI callers.
+let bearer = AuthTransport::Bearer("tok-...".to_string());
+
+// Authorization: Basic <base64>, in three sub-forms.
+let basic = AuthTransport::Basic(BasicAuth::Token("tok-...".to_string()));
+let basic_email = AuthTransport::Basic(BasicAuth::EmailPassword {
+    email: "user@example.com".to_string(),
+    password: "...".to_string(),
+});
+let basic_license = AuthTransport::Basic(BasicAuth::LicenseKey("XXXX-XXXX".to_string()));
+
+// ?token=<token> — for callers that cannot set a header.
+let query = AuthTransport::Query("tok-...".to_string());
+```
+
+Every request also carries a sanitized `Tamga-Version` header
+(`src/transport.rs::sanitize_version`), and the validate methods take an
+optional `otp` argument that becomes `Tamga-OTP` for 2FA-enabled accounts.
+
 ## Offline verification
 
-The core value proposition of this SDK over hand-rolling HTTP calls is that,
-once you check out a signed `.lic`/`.mach` file and embed the relevant public
-key in your application, verification works with **no network access at
-all**:
+Check out a signed `.lic` (or `.mach`) file once, embed your account's public
+key in the application, and every later verification runs with **no network
+access at all**.
 
-```rust,ignore
-let license = tamga::checkout::license_file::verify_license_file(
-    &pem_contents,
-    &account_ed25519_pubkey,
-    Some(license_key),
-)?;
+```rust
+use tamga::checkout::license_file::verify_license_file_with_claims;
+use tamga::crypto::ed25519::public_key_from_base64;
+
+// Embedded at build time; `pem` came from `client.check_out_license(..)`.
+let pubkey = public_key_from_base64(ACCOUNT_ED25519_PUBKEY_B64)?;
+
+let verified = verify_license_file_with_claims(&pem, &pubkey, Some(license_key))?;
+println!(
+    "license {} verified offline; exp={:?} jti={}",
+    verified.license.id, verified.claims.exp, verified.claims.jti
+);
 ```
+
+`verify_license_file` returns just the licence resource if the claims are not
+needed, and `verify_license_file_at` takes the current time from the caller —
+use it to pass a server-derived timestamp rather than a local clock a user can
+wind back.
+
+Machine files verify the same way through
+`tamga::checkout::machine_file::verify_machine_file`, with two differences:
+the signature scheme comes from the licence's own `scheme` field rather than
+being fixed to Ed25519, and decrypting one needs both the licence key **and**
+the machine fingerprint. Lighter-weight machine proofs
+(`"v1x0.<base64 signature>"`, always RSA-2048 PKCS#1 v1.5 / SHA-256) verify
+through `tamga::proof::verify_offline_proof`.
+
+### Compatibility warning: licence files are format v2 only
+
+`alg` must end in `+v2`, and the signed `meta` claims (`iat`, `exp`, `jti`,
+`kid`) live inside the signature. **A v1-issued `.lic` file is rejected
+outright — there is no fallback path**
+(`src/checkout/license_file.rs::verify_license_file_at`), so any caller
+holding a v1 file must check out a fresh one. This is a real behavioural
+break, and it is the point of v2: in v1 the requested TTL lived only in the
+unsigned JSON:API envelope around the certificate, so a 24-hour trial file
+stayed cryptographically valid forever.
 
 ## Security notes
 
-Two intentional, non-obvious cryptographic choices in this SDK's `.lic`
-verifier exist because they replicate exact server behavior — **do not
-"fix" either of them**:
+- **License-file keys are HKDF-SHA256 derived.** `salt =
+  "tamga:license-file-key-v1"`, `ikm = <license key>`, `info =
+  "license-file"` (`src/crypto/hkdf.rs::derive_license_file_key`). Machine
+  files use `salt = "tamga:machine-file-key-v1"`, `ikm = <license key>`,
+  `info = <fingerprint>` (`src/crypto/hkdf.rs::derive_machine_file_key`). The
+  distinct salts mean one licence key never yields the same AES key for both
+  formats. The pre-v2 zero-pad/truncate transform was **deleted, not
+  deprecated** — no caller can opt back into it.
+- **Derived keys are wiped on drop.** Both derivation functions return
+  `Zeroizing<[u8; 32]>` (`src/crypto/hkdf.rs`), so key material does not sit
+  in freed-but-unzeroed memory.
+- **Signed expiry is enforced, with a 60-second skew tolerance.**
+  `CLOCK_SKEW_TOLERANCE_SECS` in
+  `src/checkout/license_file.rs::verify_license_file_at` covers ordinary NTP
+  drift and nothing more — the clock belongs to the attacker, so a generous
+  allowance would just extend every expired file.
+- **The signature covers the base64 string, not the decoded bytes.** The
+  Ed25519 signature is verified over the ASCII/UTF-8 bytes of the `enc`
+  field's base64 *string* (`src/checkout/license_file.rs` passes
+  `cert.enc.as_bytes()` to `src/crypto/ed25519.rs::verify`). This replicates
+  the server's signing behaviour exactly; verifying against decoded bytes
+  rejects every genuine file.
+- **Machine-file algorithm selection never trusts the file.** The signature
+  scheme comes from the caller-supplied `scheme`, because the self-declared
+  `alg` string cannot disambiguate `RSA_2048_PKCS1_SIGN` from
+  `RSA_2048_JWT_RS256` — and letting untrusted input pick a crypto primitive
+  is an algorithm-confusion risk regardless
+  (`src/checkout/machine_file.rs::verify_machine_file`).
+- **`429` is handled, with capped and jittered backoff.** `Retry-After` is
+  parsed as delta-seconds (`src/client.rs::Client::parse_retry_after`) and
+  clamped to 60 seconds so a hostile or misconfigured proxy cannot park the
+  caller (`src/client.rs::Client::retry_delay`); without it the client falls
+  back to exponential backoff plus jitter
+  (`src/transport.rs::jitter_millis`). Auto-retry is scoped to every `GET`
+  plus five safe `POST` actions — `validate`, `validate-key`, `check-in`,
+  `check-out`, `ping` — and creates are deliberately excluded, since
+  repeating `POST /machines` risks burning a second seat
+  (`src/client.rs::Client::is_retryable`). Set
+  `ClientConfigBuilder::max_retries(0)` to handle it yourself; the exhausted
+  case surfaces as `TamgaError::RateLimited { retry_after }`.
+- **Verification errors are deliberately coarse.** "Wrong key" and "tampered
+  ciphertext" both surface as `CryptoError::DecryptionFailed`
+  (`src/error.rs::CryptoError`) — a finer-grained error would be an oracle.
+- **The `rsa` crate is banned.** RUSTSEC-2023-0071 (Marvin timing attack) is
+  unpatched, so all RSA verification goes through `aws-lc-rs`
+  (`src/crypto/rsa.rs`); the ban is enforced in CI by `deny.toml`.
 
-1. **Signature covers the base64 string, not decoded bytes.** The `.lic`
-   file's Ed25519 signature is computed over the ASCII/UTF-8 bytes of the
-   `enc` field's base64-encoded *string*, not the bytes you get after
-   base64-decoding it. Verifying against the decoded bytes will silently
-   fail against every real server-issued file.
-2. **License file encryption key is not a KDF.** The AES-256-GCM key for an
-   encrypted `.lic` file is the raw UTF-8 bytes of the license key string,
-   zero-padded or truncated to exactly 32 bytes — not a hash, not HKDF, not
-   PBKDF2. Machine files (`.mach`), by contrast, *do* use a proper
-   HKDF-SHA256 derivation. Don't assume the two formats share a key-derivation
-   strategy.
+## Known gaps
 
-See `src/crypto/naive_key.rs` and `src/crypto/ed25519.rs` for the
-authoritative doc comments — both crypto sections (E and F) have passed a
-dedicated `security-reviewer` pass.
-
-## Known Server-Side Gaps (scoped to this SDK)
-
-The full list lives in `tamga-api`'s
-[`docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
-→ "Known Server-Side Gaps". Items that affect this SDK's implemented
-surface:
-
-- Only 14 of 24 `ValidationCode` values are reachable today; this crate
-  models all 24 but only the reachable subset is exercised by tests.
-- Auth (`Authorization` header) is not enforced server-side on license or
-  machine endpoints yet — send real credentials anyway; don't assume a bad
-  credential is rejected today.
-- The server never returns `429 Too Many Requests` under the current
-  deployment — this SDK has no client-side backoff logic keyed on it.
-- Freshly-created policies report non-existent enum strings
-  (`"DENY_ACCESS"`, `"NO_RESURRECTION"`) as their defaults; this SDK treats
-  any unrecognized policy-field value as the "no restriction" variant to
-  match actual server behavior rather than the literal string.
-- Auto-update / release-checking (`GET /releases/actions/upgrade`) is not
-  built into this SDK — it crashes at runtime server-side today.
+- Only 14 of the 24 `ValidationCode` variants are reachable server-side today;
+  all 24 are modelled, with an `Unknown(String)` fallback for future additions
+  (`src/models/validation.rs`).
+- `ScopeObject`'s `entitlements`, `fingerprint`, `version` and `checksum`
+  fields are sent and parsed but not enforced server-side yet — do not treat
+  them as working constraints (`src/models/validation.rs`).
+- Auth is not enforced server-side on the licence/machine validate and
+  check-in endpoints yet, so `TamgaError::Unauthorized` is not reachable there
+  (`src/error.rs`). The SDK always sends the configured credentials anyway;
+  don't assume a bad credential is rejected today.
+- Freshly created policies report `"DENY_ACCESS"` and `"NO_RESURRECTION"` as
+  defaults, neither of which is a real variant. This crate treats any
+  unrecognized policy-field value as the "no restriction" variant, matching
+  actual server behaviour rather than the literal string
+  (`src/models/policy.rs`).
+- The two raw-PEM checkout helpers, `Client::check_out_license` and
+  `Client::check_out_machine`, send without the retry wrapper — a `429` on
+  those surfaces immediately as `TamgaError::RateLimited` instead of being
+  retried (`src/client.rs`). The JSON:API variants
+  (`check_out_license_json`, `check_out_machine_json`) do retry.
+- The `blocking` cargo feature is declared but has no code behind it yet;
+  there is no synchronous wrapper around `Client` today.
+- Release / auto-update checking is not part of this crate's surface.
+- `tests/fixtures/` is still empty: the checkout tests build fixtures
+  in-process against the documented wire format rather than replaying
+  captured server output.
 
 ## Documentation
 
-- [`docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
-  in `tamga-api` — the authoritative protocol/feature specification every
-  field name, endpoint, and enum value in this SDK is verified against.
-- [docs.rs/tamga](https://docs.rs/tamga) — generated API reference (once
-  published).
+- [docs.rs/tamga](https://docs.rs/tamga) — generated API reference.
+- [tamga.sh](https://tamga.sh) — product and API documentation.
+- [`SECURITY.md`](SECURITY.md) — threat model, what counts as a vulnerability
+  here, and how to report one privately.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, commands, MSRV policy.
 
 ## License
 
-Licensed under the MIT License. See [LICENSE](LICENSE).
+Dual-licensed under either of
+
+- MIT ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.
