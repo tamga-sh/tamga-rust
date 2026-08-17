@@ -1,27 +1,29 @@
 //! `TamgaError`, `JsonApiError`, and typed per-endpoint error codes.
 //!
-//! Intended contents (deferred — see `docs/plans/tamga-rust.plan.md` §K):
-//!
-//! - `JsonApiError`: `{ id, status, code, title, detail, source: { pointer } }`
+//! - [`JsonApiError`]: `{ id, status, code, title, detail, source: { pointer } }`
 //!   mirroring the server's JSON:API error envelope.
-//! - `TamgaError` top-level enum wrapping: `Http(reqwest::Error)`,
-//!   `Json(serde_json::Error)`, `Api(JsonApiError)`, `Crypto(CryptoError)`,
-//!   `Checkout(CheckoutError)`, `Proof(ProofError)`.
+//! - [`TamgaError`]: the top-level enum, wrapping transport failures
+//!   (`Http`, `Json`), the generic `Api` fallback, one typed variant per
+//!   server error code the SDK's endpoints can produce, and the offline
+//!   verification errors [`CheckoutError`] and [`ProofError`] (both of which
+//!   in turn wrap [`CryptoError`]).
 //! - Consumers should match errors on `code` (stable) rather than `detail`
 //!   (human text, may change).
 //! - Fixed-status codes: `NOT_FOUND` (404), `UNAUTHORIZED` (401),
 //!   `FORBIDDEN` (403), `INTERNAL_SERVER_ERROR` (500, generic — never leaks
 //!   DB detail).
-//! - Per-endpoint codes: `KEY_TAKEN`, `FINGERPRINT_TAKEN`, `PID_TAKEN` (409
-//!   conflicts); `CHECK_IN_NOT_REQUIRED`, `TTL_INVALID`,
-//!   `LICENSE_NOT_ENCRYPTED`, `LICENSE_KEY_MISSING`, `SCHEME_NOT_SUPPORTED`,
-//!   `DATASET_INVALID` (422 validation failures).
+//! - Per-endpoint codes: `FINGERPRINT_TAKEN`, `PID_TAKEN` (409 conflicts);
+//!   `CHECK_IN_NOT_REQUIRED`, `TTL_INVALID`, `LICENSE_NOT_ENCRYPTED`,
+//!   `LICENSE_KEY_MISSING`, `SCHEME_NOT_SUPPORTED`, `DATASET_INVALID` (422
+//!   validation failures). Any other code falls through to
+//!   [`TamgaError::Api`].
 //! - `429 TOO_MANY_REQUESTS` is live. Credential-accepting endpoints (session
 //!   creation, password reset, licence-key validation, token minting) run on a
 //!   tight per-IP budget — 5 requests/second by default — which a heartbeat
 //!   timer reaches easily. It maps to [`TamgaError::RateLimited`], which
-//!   carries the server's `Retry-After`; the client also retries safe requests
-//!   automatically (see `ClientConfig::max_retries`).
+//!   carries the server's parsed `Retry-After`; safe requests are retried
+//!   automatically first (see
+//!   [`crate::client::ClientConfigBuilder::max_retries`]).
 //! - `CHECK_IN_NOT_REQUIRED` (422) is a **caller error**, not something to
 //!   retry — callers should check `require_check_in` on the license's
 //!   policy before scheduling periodic check-ins.
@@ -32,8 +34,9 @@
 /// rather than [`JsonApiError::detail`] (human text, may change) — see
 /// module doc comment.
 ///
-/// `Crypto`/`Checkout`/`Proof` variants land alongside the sections that
-/// produce them (E, F, H per plan §4).
+/// Offline verification failures arrive as [`TamgaError::Checkout`] or
+/// [`TamgaError::Proof`]; neither carries a `CryptoError` directly, since
+/// both of those wrap it.
 #[derive(Debug, thiserror::Error)]
 pub enum TamgaError {
     /// Underlying HTTP transport error (connection, timeout, TLS, or
@@ -236,10 +239,9 @@ pub enum CheckoutError {
 impl TamgaError {
     /// Maps a parsed [`JsonApiError`] to its most specific [`TamgaError`]
     /// variant, falling back to the generic [`TamgaError::Api`] for any
-    /// `code` without a dedicated variant. Single dispatch point extended
-    /// as later sections (K, and E/F/H's per-endpoint codes) add more typed
-    /// variants — new codes only need a match arm here, not a new call site
-    /// at every endpoint method.
+    /// `code` without a dedicated variant. Single dispatch point: a newly
+    /// typed code needs a match arm here, not a new call site at every
+    /// endpoint method.
     pub(crate) fn from_json_api_error(err: JsonApiError) -> Self {
         match err.code.as_str() {
             "CHECK_IN_NOT_REQUIRED" => TamgaError::CheckInNotRequired(Box::new(err)),
@@ -259,8 +261,8 @@ impl TamgaError {
     }
 }
 
-/// A single JSON:API error object, matching `tamga-api`'s
-/// `crate::error::JsonApiError` field-for-field. The server always wraps
+/// A single JSON:API error object, matching the server's own error type
+/// field-for-field. The server always wraps
 /// these in a top-level `{ "errors": [...] }` array; this SDK surfaces only
 /// the first element via [`TamgaError::Api`] — every endpoint this crate
 /// calls returns at most one error per response today.

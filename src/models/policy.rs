@@ -1,7 +1,7 @@
 //! `Policy` and its enums — the policy-derived behavior reference an SDK
 //! needs to interpret a license, not just its `ValidationCode`.
 //!
-//! Intended contents (see `docs/plans/tamga-rust.plan.md` §C, §F, §G, §K):
+//! Contents:
 //!
 //! - `LicenseScheme`: `ED25519_SIGN`, `RSA_2048_PKCS1_SIGN`,
 //!   `RSA_2048_PKCS1_PSS_SIGN`, `ECDSA_P256_SIGN`, `RSA_2048_JWT_RS256`, plus

@@ -1,5 +1,4 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §D — License
-//! Check-In.
+//! Integration tests for license check-in.
 
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig, TamgaError};

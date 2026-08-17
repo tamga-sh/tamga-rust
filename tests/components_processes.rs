@@ -1,5 +1,4 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §I — Components &
-//! Processes.
+//! Integration tests for components and processes.
 
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig, TamgaError};

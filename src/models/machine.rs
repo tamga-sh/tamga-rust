@@ -1,7 +1,7 @@
 //! `MachineResource`, `HeartbeatStatus`, `ComponentResource`,
 //! `ProcessResource`, and the `Pid` newtype.
 //!
-//! Intended contents (see `docs/plans/tamga-rust.plan.md` §G, §I):
+//! Contents:
 //!
 //! - `MachineResource`: `fingerprint`, `name`, `ip`, `hostname`, `platform`,
 //!   `cores`, `memory`, `disk`, `metadata`, `heartbeat_status`, relationship
@@ -73,8 +73,7 @@ pub struct MachineAttributes {
 /// Machine heartbeat state machine: `NotStarted` → `Alive` → `Dead` →
 /// `Resurrected`. The window is a **hardcoded 600s (10 min)**, not driven
 /// by `policy.heartbeat_duration`. Treat `Dead` as "machine likely deleted
-/// server-side — re-activate rather than retry ping," per
-/// `docs/plans/tamga-rust.plan.md` §G.
+/// server-side — re-activate rather than retry ping."
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatStatus {
     /// Never pinged.

@@ -1,5 +1,4 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §G — Machine
-//! Management.
+//! Integration tests for machine management.
 
 use tamga::client::CreateMachineOptions;
 use tamga::models::machine::HeartbeatStatus;

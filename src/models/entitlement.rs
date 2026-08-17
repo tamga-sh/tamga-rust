@@ -1,10 +1,9 @@
 //! `EntitlementResource`.
 //!
-//! Intended fields (see `docs/plans/tamga-rust.plan.md` §J): `name`, `code`,
-//! `metadata`, `created`, `updated`.
+//! Fields: `name`, `code`, `metadata`, `created`, `updated`.
 //!
 //! `code` is the stable, developer-facing identifier — `name` is just a
-//! display label. `has_entitlement` (in `src/client.rs`) must match on
+//! display label. [`crate::Client::has_entitlement`] matches on
 //! `code`, never `name`. Despite the URL nesting under
 //! `/licenses/{id}/entitlements`, these are full `Entitlement` resources,
 //! not lightweight junction/relationship records.

@@ -1,5 +1,5 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §F — Machine
-//! Checkout Crypto, exercised through the HTTP client. Per-scheme
+//! Integration tests for machine checkout crypto, exercised through the HTTP
+//! client. Per-scheme
 //! signature/decryption coverage (all 4 supported schemes, JWT rejection,
 //! wrong-fingerprint rejection) lives in
 //! `src/checkout/machine_file.rs::tests` — these tests instead cover the

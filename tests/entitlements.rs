@@ -1,4 +1,5 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §J — Entitlements.
+//! Integration tests for entitlements (`Client::list_entitlements`,
+//! `get_entitlement`, `has_entitlement`).
 
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig};
