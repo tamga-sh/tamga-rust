@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2](https://github.com/tamga-sh/tamga-rust/compare/v0.2.1...v0.2.2) - 2026-08-18
+
+### Bug Fixes
+
+- Open release PRs with a GitHub App token so required checks run ([#23](https://github.com/tamga-sh/tamga-rust/pull/23)) (8ef10c1)
+
+
+
 ## [0.2.1](https://github.com/tamga-sh/tamga-rust/compare/v0.2.0...v0.2.1) - 2026-08-18
 
 ### Bug Fixes
