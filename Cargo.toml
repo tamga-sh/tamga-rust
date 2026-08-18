@@ -34,7 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tokio = { version = "1", default-features = false, features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 base64 = "0.23"
 # Wire timestamps (`created`, `updated`, `expiry`, `ts`, ...) are RFC 3339 via
 # `chrono::DateTime<Utc>`, matching the server's own serializers exactly.
