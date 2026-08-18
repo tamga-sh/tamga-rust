@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4](https://github.com/tamga-sh/tamga-rust/compare/v0.2.3...v0.2.4) - 2026-08-18
+
+### Miscellaneous
+
+- Bump actions/create-github-app-token from 2 to 3 ([#27](https://github.com/tamga-sh/tamga-rust/pull/27)) (5c3c9fd)
+
+- Bump thiserror from 1.0.69 to 2.0.20 ([#13](https://github.com/tamga-sh/tamga-rust/pull/13)) (99f6d9c)
+
+
+
 ## [0.2.3](https://github.com/tamga-sh/tamga-rust/compare/v0.2.2...v0.2.3) - 2026-08-18
 
 ### Miscellaneous
