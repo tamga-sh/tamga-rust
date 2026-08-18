@@ -15,15 +15,18 @@ jobs:
   release-plz-pr:
     name: release-plz-pr
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     if: github.repository_owner == 'tamga-sh'
     permissions:
       contents: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 10
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 10
 
       # PRs authored by the default GITHUB_TOKEN do not trigger workflows
       # (GitHub's loop prevention), so required status checks never appear and
@@ -49,6 +52,7 @@ jobs:
   release-plz-publish:
     name: release-plz-publish
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.repository_owner == 'tamga-sh'
     permissions:
       contents: write
@@ -59,9 +63,11 @@ jobs:
       id-token: write # required for crates.io Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 10
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 10
 
       - name: Authenticate to crates.io via OIDC
         uses: rust-lang/crates-io-auth-action@v1
