@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1](https://github.com/tamga-sh/tamga-rust/compare/v0.2.0...v0.2.1) - 2026-08-18
+
+### Bug Fixes
+
+- Correct SDK documentation and align package metadata (0d7cb1a)
+
+
+
 ## [0.2.0](https://github.com/tamga-sh/tamga-rust/compare/v0.1.5...v0.2.0) - 2026-08-13
 
 ### Features
