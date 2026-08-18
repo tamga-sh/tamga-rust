@@ -32,7 +32,7 @@ jobs:
       # (GitHub's loop prevention), so required status checks never appear and
       # the release PR stays blocked. A short-lived GitHub App installation
       # token is a distinct actor, so CI runs on the PR it opens.
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app-token
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
