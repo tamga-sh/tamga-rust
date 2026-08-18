@@ -24,12 +24,23 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+
+      # PRs authored by the default GITHUB_TOKEN do not trigger workflows
+      # (GitHub's loop prevention), so required status checks never appear and
+      # the release PR stays blocked. A short-lived GitHub App installation
+      # token is a distinct actor, so CI runs on the PR it opens.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Run release-plz PR step
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
   # Runs after the release-plz PR above is merged: bumps the version tag and
   # publishes to crates.io. Auth is crates.io Trusted Publishing (OIDC) via
