@@ -1,42 +1,47 @@
 //! Auth transports, request/response headers, and content-type handling.
 //!
-//! Intended contents (deferred — see `docs/plans/tamga-rust.plan.md` §B):
+//! [`AuthTransport`] carries four of the server's five accepted transports:
 //!
-//! - `AuthTransport` enum, 5 variants matching the server's try-order:
-//!   `Bearer(String)`, `Basic(BasicAuth)`, `License(String)`, `Cookie`
-//!   (documented as unsupported), `Query(String)`.
-//!   - `Bearer` → `Authorization: Bearer <token>` — the default transport
-//!     SDKs should prefer per `docs/sdk.md`.
-//!   - `Basic` has 3 sub-forms: `email:password`, `token:` (token as
-//!     username, empty password), `license:<key>` — all base64-encoded.
-//!   - `License` → `Authorization: License <key>` — the **primary transport
-//!     for embedded/client SDKs** validating against a raw license key.
-//!   - `Cookie: Tamga-Session=<uuid>` is deliberately **not implemented** —
-//!     browser/portal-only, requires a matching `Origin` header, not
-//!     relevant to a non-browser SDK.
-//!   - `Query` → `?token=`/`?auth=` query parameter.
-//! - Tokens are opaque strings — no prefix-based type detection. The server
-//!   documents `tok-`/`prod-`/`env-`/`activ-`/`lic-` prefixes, but every
-//!   issued token currently gets `tok-` regardless of type.
-//! - `Tamga-OTP: <code>` header — threaded through the request builder,
-//!   read on every authenticated request if 2FA is enabled server-side.
-//! - `Tamga-Version: <string>` header — sent explicitly on every request,
-//!   pinned per SDK major version, sanitized client-side (alphanumeric +
-//!   `.`/`-`, max 32 chars) mirroring server rules. Default `"1.8"`.
-//! - Response header readers: `Tamga-Version` (echoed), `Tamga-Edition`
-//!   (`"EE"`/`"CE"`), `Tamga-Mode` (`"singleplayer"`/`"multiplayer"`),
-//!   `X-Request-Id` (surfaced on error/response types for support logging).
-//! - Content-Type: `application/vnd.api+json` default for all JSON:API
-//!   bodies, **except** `GET .../actions/validate` (quick-validate), which
-//!   returns plain `application/json` with a flat body and no `data`
-//!   envelope — this one response shape needs special-cased parsing.
-//! - Deliberately **not** implemented: `X-RateLimit-*` response header
-//!   parsing (declared in the CORS allowlist only, never set by any handler
-//!   today) and the `Tamga-Environment` request header (planned EE feature,
-//!   no server-side read path yet).
+//! - [`AuthTransport::Bearer`] → `Authorization: Bearer <token>` — the
+//!   default transport, preferred for server-side and CI callers.
+//! - [`AuthTransport::Basic`] → `Authorization: Basic <base64>`, in the three
+//!   sub-forms of [`BasicAuth`]: `email:password`, `token:` (token as
+//!   username, empty password), and `license:<key>`.
+//! - [`AuthTransport::License`] → `Authorization: License <key>` — the
+//!   **primary transport for embedded/client SDKs** validating against a raw
+//!   license key.
+//! - [`AuthTransport::Query`] → a `?token=` query parameter, for the rare
+//!   caller that cannot set a header. The server also accepts `?auth=`.
+//!
+//! `Cookie: Tamga-Session=<uuid>` is deliberately **not** implemented —
+//! browser/portal-only, requires a matching `Origin` header, not relevant to
+//! a non-browser SDK.
+//!
+//! Tokens are opaque strings; this SDK does no prefix-based type detection.
+//!
+//! Headers this module owns:
+//!
+//! - `Tamga-Version` — sent on every request, sanitized by
+//!   [`sanitize_version`] (alphanumeric plus `.`/`-`, max 32 chars) mirroring
+//!   the server's own filter. Default [`DEFAULT_API_VERSION`].
+//! - `Tamga-OTP` — threaded through the request builder for accounts with 2FA
+//!   enabled; every [`crate::Client`] validate method takes an `otp` argument.
+//! - Response headers, read back via [`ResponseInfo::from_headers`]:
+//!   `Tamga-Version` (echoed), `Tamga-Edition` (`"EE"`/`"CE"`), `Tamga-Mode`
+//!   (`"singleplayer"`/`"multiplayer"`), `X-Request-Id`.
+//!
+//! Content-Type is `application/vnd.api+json` for all JSON:API bodies,
+//! **except** `GET .../actions/validate` (quick-validate), which returns
+//! plain `application/json` with a flat body and no `data` envelope.
+//!
+//! Deliberately **not** implemented: `X-RateLimit-*` response header parsing
+//! (declared in the CORS allowlist only, never set by any handler today) and
+//! the `Tamga-Environment` request header (no server-side read path yet).
+//! Rate limiting is handled off the `429` status and `Retry-After` instead —
+//! see [`crate::TamgaError::RateLimited`].
 
-/// Auth transport variants matching the server's try-order. Stub — see
-/// module doc comment above.
+/// Auth transport variants matching the server's try-order — see the module
+/// doc comment for which header or query parameter each one produces.
 #[derive(Debug, Clone)]
 pub enum AuthTransport {
     /// `Authorization: Bearer <token>` — default/preferred transport.
@@ -49,7 +54,8 @@ pub enum AuthTransport {
     Query(String),
 }
 
-/// Sub-forms of HTTP Basic auth accepted by the server. Stub.
+/// Sub-forms of HTTP Basic auth accepted by the server. All three are
+/// base64-encoded into a single `Authorization: Basic <base64>` header.
 #[derive(Debug, Clone)]
 pub enum BasicAuth {
     /// `base64(email:password)`.

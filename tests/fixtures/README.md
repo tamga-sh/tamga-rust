@@ -1,16 +1,17 @@
 # Test Fixtures
 
 Placeholder. This directory will hold known-good `.lic` and `.mach` files
-captured from a running `tamga-api` instance, used by the integration tests
+captured from a running Tamga server, used by the integration tests
 under `tests/checkout_license_file.rs`, `tests/checkout_machine_file.rs`, and
-`tests/machine_offline_proof.rs` (see `docs/plans/tamga-rust.plan.md` §E, §F,
-§H).
+`tests/machine_offline_proof.rs`.
 
 Planned contents once captured:
 
-- `license_file_plain.lic` — unencrypted license checkout, Ed25519-signed.
+- `license_file_plain.lic` — unencrypted, Ed25519-signed license checkout
+  (`alg` = `base64+ed25519+v2`).
 - `license_file_encrypted.lic` — AES-256-GCM encrypted license checkout
-  (naive key derivation from the license key string).
+  (`alg` = `aes-256-gcm+ed25519+v2`), key derived by
+  `crypto::hkdf::derive_license_file_key`.
 - `machine_file_ed25519.mach`, `machine_file_rsa_pkcs1.mach`,
   `machine_file_rsa_pss.mach`, `machine_file_ecdsa_p256.mach` — one per
   supported `LicenseScheme`, both plain and HKDF-encrypted variants.

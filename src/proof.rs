@@ -10,13 +10,11 @@
 //! ⚠️ **Byte-exact serialization gotcha, and why it's implemented with
 //! `serde_json::Value`, not a fixed-field-order struct**: the signature
 //! covers `{"account":{"id":...},"machine":{"id":...,"fingerprint":...},
-//! "dataset":<client dataset>}`, but the server (see
-//! `tamga-api/src/features/machines/generate_offline_proof.rs`) builds that
-//! payload via `serde_json::json!(...)` — and `serde_json::Map` is
-//! `BTreeMap`-backed (alphabetically sorted output) unless the
-//! `preserve_order` crate feature is enabled, which it is **not** anywhere
-//! in `tamga-api`'s dependency graph (confirmed: no `indexmap` in its
-//! `Cargo.lock` next to `serde_json`). So despite the source code literally
+//! "dataset":<client dataset>}`, but the server builds that payload via
+//! `serde_json::json!(...)` — and `serde_json::Map` is `BTreeMap`-backed
+//! (alphabetically sorted output) unless the `preserve_order` crate feature
+//! is enabled, which it is **not** in the server's dependency graph. So
+//! despite the source code literally
 //! writing `{"account": ..., "machine": ..., "dataset": ...}`, the actual
 //! bytes on the wire are alphabetically sorted at every nesting level:
 //! `{"account":{"id":...},"dataset":...,"machine":{"fingerprint":...,
@@ -28,16 +26,15 @@
 //! `{"account":...,"machine":...,"dataset":...}`, which does not match. The
 //! correct fix (used here) is building the payload with
 //! `serde_json::Value`/`json!()`, exactly mirroring how the server builds
-//! it: `tamga-rust`'s own `Cargo.lock` also has no `indexmap` next to its
+//! it: this crate's own `Cargo.lock` also has no `indexmap` next to its
 //! `serde_json`, so both sides independently normalize to the same
 //! canonical alphabetical order regardless of construction order — this is
 //! *more* robust than a hand-ordered struct, not less, because it doesn't
 //! depend on whoever writes the SDK correctly guessing and hardcoding the
-//! server's sort order. The one real requirement the plan's "never a
-//! `HashMap`" warning is getting at still holds: never use a
-//! non-deterministic-iteration-order type (`std::collections::HashMap`) —
+//! server's sort order. What must never appear here is a
+//! non-deterministic-iteration-order type (`std::collections::HashMap`);
 //! `serde_json::Value`'s `BTreeMap`-backed `Map` is deterministic and is
-//! what's actually needed here.
+//! what's actually needed.
 //!
 //! This is a lighter-weight alternative to full checkout for periodic
 //! "prove this machine is still valid" pings in air-gapped environments.
@@ -133,9 +130,9 @@ mod tests {
 
     #[test]
     fn payload_json_matches_a_known_good_server_produced_fixture() {
-        // Hand-verified against the exact structure
-        // tamga-api/src/features/machines/generate_offline_proof.rs
-        // produces for these inputs (BTreeMap/alphabetical order).
+        // Hand-verified against the exact structure the Tamga API's
+        // offline-proof generator produces for these inputs
+        // (BTreeMap/alphabetical order).
         let account_id: uuid::Uuid = "01926b3e-0000-7000-8000-000000000000".parse().unwrap();
         let machine_id: uuid::Uuid = "01926b3e-1111-7000-8000-000000000000".parse().unwrap();
         let json = build_payload_json(

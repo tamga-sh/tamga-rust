@@ -1,7 +1,7 @@
 //! `Policy` and its enums — the policy-derived behavior reference an SDK
 //! needs to interpret a license, not just its `ValidationCode`.
 //!
-//! Intended contents (see `docs/plans/tamga-rust.plan.md` §C, §F, §G, §K):
+//! Contents:
 //!
 //! - `LicenseScheme`: `ED25519_SIGN`, `RSA_2048_PKCS1_SIGN`,
 //!   `RSA_2048_PKCS1_PSS_SIGN`, `ECDSA_P256_SIGN`, `RSA_2048_JWT_RS256`, plus
@@ -53,10 +53,11 @@
 /// The wire field (`license.scheme`/`policy.scheme`) is `Option<String>` —
 /// `None` or `""` means "legacy plain/unsigned key" and has **no**
 /// corresponding variant here. When generating a **machine** file the
-/// server defaults an unset scheme to [`LicenseScheme::Ed25519Sign`] (see
-/// `tamga-api/src/features/machines/check_out_machine.rs`); callers of
-/// [`crate::checkout::machine_file::verify_machine_file`] whose license has
-/// no `scheme` set must pass `Ed25519Sign` to match, not skip verification.
+/// server defaults an unset scheme to [`LicenseScheme::Ed25519Sign`] on
+/// machine check-out; callers of
+/// [`crate::checkout::machine_file::verify_machine_file`] whose license
+/// has no `scheme` set must pass `Ed25519Sign` to match, not skip
+/// verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LicenseScheme {
     /// Ed25519 signature. The machine-file default when a license has no
@@ -433,13 +434,13 @@ free_text_policy_field!(AuthenticationStrategy {
 });
 
 /// The `policies` JSON:API resource: `{ id, type, attributes }`. Field set
-/// matches `tamga-api`'s actual `PolicyResource`/`PolicyAttributes`
+/// matches the Tamga API's actual `PolicyResource`/`PolicyAttributes`
 /// serializer exactly — several fields here (`product_id`, `duration`,
 /// `expiration_basis`, `machine_uniqueness_strategy`, `use_pool`,
 /// `protected`, `check_in_interval_count`, `require_heartbeat`,
-/// `max_users`) aren't mentioned in this plan's abbreviated field list but
-/// are real server fields, ground-truth-verified against
-/// `tamga-api/src/features/policies/serializer.rs`.
+/// `max_users`) are omitted from abbreviated summaries of the policy
+/// resource, but they are real server fields and were verified against the
+/// server's own policy serializer.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Policy {
     /// UUIDv7 policy ID.

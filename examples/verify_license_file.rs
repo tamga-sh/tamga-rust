@@ -43,14 +43,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         license.id, license.attributes.key, license.attributes.status
     );
 
-    // `ttl`/`expiry` on the checkout response are metadata only — never
-    // re-checked server-side on any later validation. Enforcing an offline
-    // file's expiry is entirely this SDK's/caller's responsibility; do it
-    // explicitly rather than assuming a re-validation call would catch it.
-    println!(
-        "note: this SDK does not auto-enforce checkout ttl/expiry — check \
-         it yourself if your offline-file flow needs that guarantee"
-    );
+    // The `ttl`/`expiry` fields on the JSON:API checkout envelope are
+    // metadata only and must not be trusted — whoever holds the file can
+    // edit them. The authoritative expiry is the signed `meta.exp` claim
+    // inside the certificate, which `verify_license_file` enforces (60s
+    // clock-skew tolerance); an expired file fails with
+    // `CheckoutError::Expired`. Use `verify_license_file_at` to supply a
+    // server-derived timestamp instead of trusting the local clock.
+    println!("expiry was enforced from the file's signed `exp` claim");
 
     Ok(())
 }

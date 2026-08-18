@@ -9,7 +9,7 @@ repository = "https://github.com/tamga-sh/tamga-rust"
 homepage = "https://github.com/tamga-sh/tamga-rust"
 documentation = "https://docs.rs/tamga"
 readme = "README.md"
-keywords = ["licensing", "license", "software-licensing", "keygen", "drm"]
+keywords = ["licensing", "software-licensing", "license-key", "activation", "entitlements"]
 categories = ["api-bindings", "cryptography", "authentication"]
 
 [package.metadata.docs.rs]
@@ -37,10 +37,10 @@ serde_json = "1"
 thiserror = "1"
 base64 = "0.23"
 # Wire timestamps (`created`, `updated`, `expiry`, `ts`, ...) are RFC 3339 via
-# `chrono::DateTime<Utc>`, matching `tamga-api`'s own serializers exactly.
+# `chrono::DateTime<Utc>`, matching the server's own serializers exactly.
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
-# `v7` only — this SDK/server convention is UUIDv7 everywhere (see tamga-api
-# CLAUDE.md "UUID v7 only"). The `v4` feature is intentionally absent.
+# `v7` only — this SDK/server convention is UUIDv7 everywhere. The `v4`
+# feature is intentionally absent.
 uuid = { version = "1", features = ["v7", "serde"] }
 
 # --- Crypto ---

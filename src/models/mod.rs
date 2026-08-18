@@ -1,7 +1,7 @@
 //! Wire models for every JSON:API resource and value type this SDK exchanges
 //! with the server.
 //!
-//! Module layout (see `docs/plans/tamga-rust.plan.md` §2, §C, §G, §J, §K):
+//! Module layout:
 //!
 //! - [`license`] — `LicenseResource`.
 //! - [`validation`] — `ScopeObject` (8 fields), `ValidationMeta`,

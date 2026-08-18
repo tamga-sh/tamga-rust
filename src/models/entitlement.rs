@@ -1,16 +1,15 @@
 //! `EntitlementResource`.
 //!
-//! Intended fields (see `docs/plans/tamga-rust.plan.md` §J): `name`, `code`,
-//! `metadata`, `created`, `updated`.
+//! Fields: `name`, `code`, `metadata`, `created`, `updated`.
 //!
 //! `code` is the stable, developer-facing identifier — `name` is just a
-//! display label. `has_entitlement` (in `src/client.rs`) must match on
+//! display label. [`crate::Client::has_entitlement`] matches on
 //! `code`, never `name`. Despite the URL nesting under
 //! `/licenses/{id}/entitlements`, these are full `Entitlement` resources,
 //! not lightweight junction/relationship records.
 
 /// The `entitlements` JSON:API resource: `{ id, type, attributes }`. Field
-/// set matches `tamga-api`'s actual full `EntitlementResource` serializer —
+/// set matches the Tamga API's actual full `EntitlementResource` serializer —
 /// confirmed the license-scoped list/get endpoints return this, not the
 /// lightweight `LicenseEntitlementResource` junction resource (which only
 /// carries `created`/`updated` timestamps).

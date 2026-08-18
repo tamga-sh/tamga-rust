@@ -1,14 +1,9 @@
 //! `LicenseResource` — the JSON:API `licenses` resource.
 //!
-//! Field set matches `tamga-api`'s actual `LicenseResource`/`LicenseAttributes`
-//! serializer (`src/features/licenses/serializer.rs`) exactly, not the
-//! abbreviated field list in `docs/plans/tamga-rust.plan.md` §C — per this
-//! repo's `CLAUDE.md`, `docs/sdk.md`/the running server wins over the plan
-//! when they disagree, and the server source is more authoritative than
-//! either. Notably: **no `relationships` object exists on this resource
-//! today** (the plan's checklist mentions `policy`/`product`/`owner`
-//! relationships, but the server's serializer never emits one) — this SDK
-//! must not model a relationships field the server never sends.
+//! The field set matches the server's own `licenses` serializer exactly.
+//! Notably: **no `relationships` object exists on this resource today** — the
+//! server's serializer never emits one, so this SDK does not model a
+//! `policy`/`product`/`owner` relationships field the server never sends.
 
 /// The `licenses` JSON:API resource: `{ id, type, attributes }`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -22,7 +17,7 @@ pub struct LicenseResource {
     pub attributes: LicenseAttributes,
 }
 
-/// Attributes of a [`LicenseResource`], matching `tamga-api`'s
+/// Attributes of a [`LicenseResource`], matching the Tamga API's
 /// `LicenseAttributes` field-for-field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LicenseAttributes {

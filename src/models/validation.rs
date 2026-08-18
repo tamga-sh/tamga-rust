@@ -1,6 +1,6 @@
 //! `ScopeObject`, `ValidationMeta`, and `ValidationCode`.
 //!
-//! Intended contents (see `docs/plans/tamga-rust.plan.md` §C):
+//! Contents:
 //!
 //! - `ScopeObject`: 8 optional fields — `product`, `policy`, `user`,
 //!   `environment` (`Uuid`), `entitlements` (`Vec<String>`), `fingerprint`,

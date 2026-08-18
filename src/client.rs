@@ -1,41 +1,55 @@
 //! `Client` and `ClientConfig` — the single home for every endpoint method.
 //!
-//! Per `docs/plans/tamga-rust.plan.md` §2 (Architecture), this repo has no
-//! `src/features/<slice>/` VSA layout like `tamga-api`; an SDK is a thin
-//! client, not a multi-slice server, so every endpoint method lives here
-//! (grouped by HTTP verb/endpoint) plus the request/response models in
-//! `src/models/`. Split into `client/` submodules only if this file exceeds
-//! ~800 lines in practice.
+//! An SDK is a thin client, not a multi-slice server, so every endpoint
+//! method lives here (grouped by HTTP verb/endpoint) plus the
+//! request/response models in [`crate::models`].
 //!
-//! Intended contents (deferred — see plan Sections B through K):
+//! What lives here:
 //!
-//! - `ClientConfig`: `account_id` (required), `base_url`/`host` (required),
-//!   `api_version` (default `"1.8"`), request `timeout`, plus a builder.
+//! - [`ClientConfig`]: `account_id` (required), `host` (required),
+//!   `api_version` (default [`crate::transport::DEFAULT_API_VERSION`]),
+//!   request `timeout`, auth transport, and `max_retries`, built via
+//!   [`ClientConfigBuilder`].
 //! - Base URL construction: `https://<host>/v1/accounts/{account_id}/...` —
 //!   `account_id` is always required, including singleplayer mode.
-//! - `reqwest::Client` construction with configurable timeout and a
-//!   `User-Agent` string (`tamga-rust/<crate-version>`).
-//! - License validation: `validate_by_key`, `validate_by_id`, `quick_validate`.
-//! - License check-in: `check_in`.
-//! - License checkout: `check_out_license`, `check_out_license_json`.
-//! - Machine checkout: `check_out_machine`, `check_out_machine_json`.
-//! - Machine management: `create_machine`, `ping_heartbeat`, `reset_heartbeat`,
-//!   plus an "activate machine" convenience helper composing
-//!   `create_machine` + `validate_by_id` + optional auto-delete-on-overage.
-//! - Machine offline proof: `generate_offline_proof`.
-//! - Components & processes: `create_component`, `list_components`,
-//!   `create_process`, `ping_process`.
-//! - Entitlements: `list_entitlements`, `get_entitlement`, `has_entitlement`.
+//! - License validation: [`Client::validate_by_key`],
+//!   [`Client::validate_by_id`], [`Client::quick_validate`].
+//! - License check-in: [`Client::check_in`].
+//! - License checkout: [`Client::check_out_license`],
+//!   [`Client::check_out_license_json`].
+//! - Machine checkout: [`Client::check_out_machine`],
+//!   [`Client::check_out_machine_json`].
+//! - Machine management: [`Client::create_machine`],
+//!   [`Client::ping_heartbeat`], [`Client::reset_heartbeat`],
+//!   [`Client::delete_machine`], plus [`Client::activate_machine`], which
+//!   composes create + validate + optional auto-delete-on-overage.
+//! - Machine offline proof: [`Client::generate_offline_proof`].
+//! - Components & processes: [`Client::create_component`],
+//!   [`Client::list_components`], [`Client::create_process`],
+//!   [`Client::ping_process`].
+//! - Entitlements: [`Client::list_entitlements`], [`Client::get_entitlement`],
+//!   [`Client::has_entitlement`].
 //!
-//! Every method should send `Authorization: License <key>` (or another
-//! configured [`crate::transport::AuthTransport`]) even where `docs/sdk.md`
-//! notes server-side auth enforcement is not yet wired — this keeps the SDK
-//! forward-compatible with future server-side enforcement.
+//! Every method sends the configured [`crate::transport::AuthTransport`]'s
+//! credentials, even on endpoints where server-side auth enforcement is not
+//! yet wired — this keeps callers forward-compatible with enforcement landing.
+//!
+//! **Rate limiting.** Requests that go through the JSON:API and
+//! quick-validate paths are sent via `send_with_retry`, which retries a `429`
+//! up to [`ClientConfig::max_retries`] times using the server's `Retry-After`
+//! (capped at 60s) or jittered exponential backoff. Only safe requests
+//! qualify: every `GET`, plus `POST` on the five action suffixes
+//! `/actions/validate`, `/actions/validate-key`, `/actions/check-in`,
+//! `/actions/check-out` and `/actions/ping`. Creates are excluded on purpose.
+//! The two raw-PEM helpers ([`Client::check_out_license`],
+//! [`Client::check_out_machine`]) send directly and surface a `429` as
+//! [`crate::TamgaError::RateLimited`] without retrying.
 
 /// Configuration for a [`Client`].
 ///
 /// Build via [`ClientConfig::builder`]. `account_id` and `host` are always
-/// required — including singleplayer mode, per `docs/sdk.md`.
+/// required — including singleplayer mode, per the Tamga API protocol
+/// specification.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Tamga account ID, always required (even in singleplayer mode).
@@ -53,8 +67,10 @@ pub struct ClientConfig {
     /// How many times to retry a rate-limited (`429`) request before giving
     /// up. Zero disables automatic retries entirely.
     ///
-    /// Only requests that are safe to repeat are retried — see
-    /// [`Client::is_retryable`].
+    /// Only requests that are safe to repeat are retried: every `GET`, plus
+    /// `POST` on the `validate`, `validate-key`, `check-in`, `check-out` and
+    /// `ping` actions. Creates are never retried — see the module doc
+    /// comment.
     pub max_retries: u32,
 }
 
@@ -133,8 +149,8 @@ impl ClientConfigBuilder {
     /// Sets the auth transport used to authenticate every request. Required
     /// before [`Self::build`] — there is no auth-less default, since every
     /// documented server endpoint expects credentials to be sent even where
-    /// enforcement isn't wired up yet (see `docs/sdk.md` → Known Server-Side
-    /// Gaps).
+    /// enforcement isn't wired up yet (see the Tamga API protocol
+    /// specification → Known Server-Side Gaps).
     pub fn auth(mut self, auth: crate::transport::AuthTransport) -> Self {
         self.auth = Some(auth);
         self
@@ -173,7 +189,7 @@ impl ClientConfigBuilder {
 
 /// The Tamga API client — every endpoint method (validate, check-in,
 /// checkout, machine management, components/processes, entitlements, offline
-/// proof) lives here, per plan §2. Endpoint methods land in Sections C–K.
+/// proof) lives here. See the module doc comment for the full index.
 #[derive(Debug, Clone)]
 pub struct Client {
     pub(crate) http: reqwest::Client,
@@ -818,7 +834,7 @@ impl Client {
     /// **Not** JSON:API-enveloped on the request side (unlike
     /// `create_machine`) — the server's `create_component` handler expects
     /// a flat `{ machine_id, fingerprint, name, metadata }` body; this is a
-    /// real asymmetry in `tamga-api`, not an SDK oversight.
+    /// real asymmetry in the Tamga API, not an SDK oversight.
     ///
     /// Unique per `(account_id, machine_id, fingerprint)` — a duplicate
     /// fails with [`crate::TamgaError::FingerprintTaken`].

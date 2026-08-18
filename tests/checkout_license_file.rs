@@ -1,6 +1,5 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §E — License
-//! Checkout Crypto, exercised through the HTTP client (unit tests for the
-//! verification logic itself live in
+//! Integration tests for license checkout crypto, exercised through the HTTP
+//! client (unit tests for the verification logic itself live in
 //! `src/checkout/license_file.rs::tests`).
 
 use base64::Engine as _;

@@ -10,7 +10,7 @@ cargo build
 
 No external services are required to build or run the unit test suite — this
 is a client SDK, not a server. Integration tests that exercise the HTTP layer
-run against a mocked server (`wiremock`), not a live `tamga-api` instance.
+run against a mocked server (`wiremock`), not a live Tamga deployment.
 
 ## Commands
 
@@ -49,8 +49,8 @@ inaccurate changelog and can skip a release entirely.
 
 ## Required Status Checks (Branch Protection)
 
-Once `.github/workflows/ci.yml` exists, configure these as required checks
-before merging to `main` (job names must match the workflow exactly):
+Configure these `.github/workflows/ci.yml` jobs as required checks before
+merging to `main` (job names must match the workflow exactly):
 
 - `fmt`
 - `clippy`
@@ -62,6 +62,5 @@ before merging to `main` (job names must match the workflow exactly):
 
 Any change under `src/crypto/` or `src/checkout/` (signature verification,
 key derivation, decryption) requires a `security-reviewer` pass
-(`ecc:security-review`) before merge — see the plan's Quality Gates section
-(`docs/plans/tamga-rust.plan.md` §4). Do not merge crypto-path changes on
+(`ecc:security-review`) before merge. Do not merge crypto-path changes on
 `rust-reviewer` approval alone.

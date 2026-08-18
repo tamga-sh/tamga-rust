@@ -1,5 +1,4 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §C — License
-//! Validation.
+//! Integration tests for license validation.
 
 use tamga::models::validation::ScopeObject;
 use tamga::transport::AuthTransport;

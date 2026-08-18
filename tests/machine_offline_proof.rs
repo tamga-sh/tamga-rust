@@ -1,5 +1,5 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §H — Machine
-//! Offline Proof, exercised through the HTTP client. The core
+//! Integration tests for the machine offline proof, exercised through the
+//! HTTP client. The core
 //! byte-exact-serialization / field-order-sensitivity / tampered-dataset
 //! coverage lives in `src/proof.rs::tests` — these tests instead cover
 //! `Client::generate_offline_proof`'s request/response wiring.

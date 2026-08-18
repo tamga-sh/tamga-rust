@@ -4,7 +4,7 @@
 
 `tamga-rust` is the reference implementation for the whole Tamga SDK family — `tamga-c` exposes this exact crate through a C ABI, and `tamga-java`/`tamga-swift` bind to `tamga-c` in turn. A cryptographic bug here propagates to three other SDKs. The highest-risk code lives in:
 
-- [`src/crypto/`](src/crypto/) — Ed25519, RSA-PKCS1/PSS (via `aws-lc-rs`, never the banned `rsa` crate), ECDSA-P256, AES-256-GCM, HKDF-SHA256, and the naive license-file key derivation.
+- [`src/crypto/`](src/crypto/) — Ed25519, RSA-PKCS1/PSS (via `aws-lc-rs`, never the banned `rsa` crate), ECDSA-P256, AES-256-GCM, and the HKDF-SHA256 derivations for both offline file types.
 - [`src/checkout/`](src/checkout/) — `.lic`/`.mach` file parse/verify/decrypt.
 - [`src/proof.rs`](src/proof.rs) — offline proof generate/verify, byte-exact JSON serialization.
 
@@ -48,11 +48,21 @@ The following are intentional design decisions, not bugs, and reports about
 them will be closed without action (though corrections/clarifications are
 welcome):
 
-- The `.lic` file's encryption key derivation is a zero-pad/truncate
-  transform, not a real KDF. This is mandated by server wire compatibility.
+- The `.lic`/`.mach` Ed25519 signature is verified over the ASCII/UTF-8 bytes
+  of the `enc` field's base64 **string**, not over its decoded bytes
+  (`src/checkout/license_file.rs::verify_license_file_at`). This replicates
+  the server's signing behaviour exactly; verifying over decoded bytes would
+  reject every genuine file.
 - Auth is not currently enforced server-side on the license/machine
   validate/check-in endpoints (a server-side gap, not a client-side one) —
   this SDK still always sends its configured credentials for
   forward-compatibility.
-- No client-side rate-limit/backoff handling — the server does not send
-  `429` today.
+- Offline licence files must be format v2. A file whose `alg` does not end in
+  `+v2` is rejected outright with no fallback
+  (`src/checkout/license_file.rs::verify_license_file_at`). Refusing v1 is
+  the fix, not a regression: v1 carried the requested TTL only in the
+  unsigned JSON:API envelope, so a trial file stayed cryptographically valid
+  forever.
+- `CryptoError` deliberately does not distinguish "wrong key" from "tampered
+  ciphertext" (`src/error.rs::CryptoError`) — a finer-grained error would be
+  an oracle for an attacker probing for valid inputs.

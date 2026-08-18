@@ -1,10 +1,10 @@
 //! AES-256-GCM decryption, shared by both the license file (`.lic`) and
 //! machine file (`.mach`) checkout formats.
 //!
-//! The two formats differ only in **how the 32-byte key is derived** —
-//! license files use the non-KDF transform in `src/crypto/naive_key.rs`,
-//! machine files use proper HKDF-SHA256 in `src/crypto/hkdf.rs`. This module
-//! only implements the decrypt primitive itself, key-agnostic.
+//! The two formats differ only in **which HKDF-SHA256 inputs derive the
+//! 32-byte key** — see [`crate::crypto::hkdf::derive_license_file_key`] and
+//! [`crate::crypto::hkdf::derive_machine_file_key`]. This module only
+//! implements the decrypt primitive itself, key-agnostic.
 //!
 //! Wire format for both: `nonce(12B) ‖ ciphertext ‖ tag(16B)`, random nonce
 //! per checkout call.

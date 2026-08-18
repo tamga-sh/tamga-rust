@@ -1,4 +1,4 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §K — Error Model.
+//! Integration tests for the error model (`src/error.rs`).
 //!
 //! End-to-end error-path coverage for codes not already exercised via a
 //! mocked server round trip in another section's test file: the fixed

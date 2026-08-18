@@ -1,8 +1,7 @@
-//! Integration tests for `docs/plans/tamga-rust.plan.md` §B (deferred items
-//! that need a real endpoint to exercise — see the plan file's Section B
-//! note). Uses `quick_validate` (Section C) as the vehicle since it's the
-//! simplest endpoint with both a header-sensitive request and a
-//! non-enveloped response body.
+//! Integration tests for the transport layer's request/response header
+//! handling, which needs a real endpoint to exercise. Uses `quick_validate` as
+//! the vehicle since it's the simplest endpoint with both a header-sensitive
+//! request and a non-enveloped response body.
 
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig};

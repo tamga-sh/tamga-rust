@@ -1,5 +1,5 @@
-//! Validates a license by key against a running `tamga-api` instance and
-//! interprets the resulting `ValidationCode`.
+//! Validates a license by key against a running Tamga server and interprets
+//! the resulting `ValidationCode`.
 //!
 //! ```bash
 //! TAMGA_ACCOUNT_ID=... TAMGA_HOST=api.tamga.sh TAMGA_LICENSE_KEY=... \
@@ -17,8 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let license_key = std::env::var("TAMGA_LICENSE_KEY")?;
 
     // `AuthTransport::License` is the primary transport for embedded/client
-    // SDKs validating against a raw license key — see
-    // `src/transport.rs`'s doc comment.
+    // SDKs validating against a raw license key — see the `tamga::transport`
+    // module docs for the other three.
     let config = ClientConfig::builder(account_id, host)
         .auth(AuthTransport::License(license_key.clone()))
         .build();

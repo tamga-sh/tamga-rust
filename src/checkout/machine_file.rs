@@ -1,7 +1,7 @@
 //! `.mach` file parsing and verification.
 //!
-//! Same shape as `.lic` (see `src/checkout/license_file.rs`) with these
-//! machine-specific differences (see `docs/plans/tamga-rust.plan.md` §F):
+//! Same shape as `.lic` (see [`crate::checkout::license_file`]) with these
+//! machine-specific differences:
 //!
 //! - Wrapper: `-----BEGIN MACHINE FILE-----`/`-----END MACHINE FILE-----`,
 //!   same inner `{ enc, sig, alg }` JSON structure.
@@ -15,16 +15,15 @@
 //!   server returns `422 SCHEME_NOT_SUPPORTED`) — this SDK's local verifier
 //!   must reject that scheme up front rather than attempt JWT parsing.
 //! - Encryption key (when encrypted) is **HKDF-SHA256** derived (see
-//!   `src/crypto/hkdf.rs`): `salt="tamga:machine-file-key-v1"`,
-//!   `ikm=<license key>`, `info=<machine fingerprint>` → 32-byte AES key. A
-//!   verifier needs both the license key and the target machine's
-//!   fingerprint to decrypt.
+//!   [`crate::crypto::hkdf::derive_machine_file_key`]):
+//!   `salt="tamga:machine-file-key-v1"`, `ikm=<license key>`,
+//!   `info=<machine fingerprint>` → 32-byte AES key. A verifier needs both
+//!   the license key and the target machine's fingerprint to decrypt.
+//! - No signed `exp` claim, and so no expiry enforcement — that is specific
+//!   to the licence file's format v2 payload.
 //!
-//! Intended public API: `verify_machine_file(pem: &str, scheme:
-//! crate::models::policy::LicenseScheme, pubkey: &[u8], license_key:
-//! Option<&str>, fingerprint: Option<&str>) -> Result<MachineResource,
-//! CheckoutError>`, dispatching to the correct verifier in `src/crypto/`
-//! based on `scheme`.
+//! Public API: [`verify_machine_file`] dispatches to the correct verifier in
+//! [`crate::crypto`] based on the caller-supplied `scheme`.
 
 const PEM_HEADER: &str = "-----BEGIN MACHINE FILE-----";
 const PEM_FOOTER: &str = "-----END MACHINE FILE-----";
@@ -92,8 +91,8 @@ struct DataPayload {
     data: crate::models::machine::MachineResource,
 }
 
-/// Maps a [`crate::models::policy::LicenseScheme`] to its `alg` suffix, per
-/// `tamga-api`'s `scheme_to_alg_suffix` — note both `Rsa2048Pkcs1Sign` and
+/// Maps a [`crate::models::policy::LicenseScheme`] to its `alg` suffix,
+/// mirroring the server's own mapping — note both `Rsa2048Pkcs1Sign` and
 /// `Rsa2048JwtRs256` map to the same `"rsa-sha256"` suffix server-side,
 /// which is exactly why algorithm selection in [`verify_machine_file`] is
 /// driven by the caller-supplied `scheme` parameter, never by parsing the
@@ -256,7 +255,7 @@ mod tests {
     }
 
     /// Signs `enc` with the scheme-appropriate key, returning the raw
-    /// signature bytes — mirrors `tamga-api`'s `sign()` dispatch.
+    /// signature bytes — mirrors the Tamga API's `sign()` dispatch.
     fn sign_for_scheme(
         scheme: LicenseScheme,
         enc: &str,
