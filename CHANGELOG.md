@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3](https://github.com/tamga-sh/tamga-rust/compare/v0.2.2...v0.2.3) - 2026-08-18
+
+### Miscellaneous
+
+- Bound every job and install step with a timeout ([#25](https://github.com/tamga-sh/tamga-rust/pull/25)) (1ac0780)
+
+
+
 ## [0.2.2](https://github.com/tamga-sh/tamga-rust/compare/v0.2.1...v0.2.2) - 2026-08-18
 
 ### Bug Fixes
