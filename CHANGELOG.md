@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5](https://github.com/tamga-sh/tamga-rust/compare/v0.2.4...v0.2.5) - 2026-08-20
+
+### Miscellaneous
+
+- Correct the stale claim that three SDKs run this crate ([#30](https://github.com/tamga-sh/tamga-rust/pull/30)) (e52b22b)
+
+
+
 ## [0.2.4](https://github.com/tamga-sh/tamga-rust/compare/v0.2.3...v0.2.4) - 2026-08-18
 
 ### Miscellaneous

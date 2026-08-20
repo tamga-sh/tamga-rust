@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "tamga"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
