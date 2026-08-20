@@ -6,11 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `tamga-rust` is the official Rust SDK for Tamga (license activation, offline verification, machine
 management). Single crate, published to crates.io as the bare name `tamga`. It is priority 1 of the
-8-repository SDK index and the **reference implementation** for the whole SDK program: `tamga-c`
-exposes this exact crate through a stable C ABI, and `tamga-java`/`tamga-swift` bind to `tamga-c` in
-turn rather than re-implementing signature verification per language. Every cryptographic bug or
-protocol-parsing mistake made here propagates to three other SDKs — see the GOTCHAS section below
-before touching anything in `src/crypto/` or `src/checkout/`.
+8-repository SDK index and the **reference implementation** for the whole SDK program.
+
+That word no longer means "the code the others run". It used to: `tamga-c` exposed this exact crate
+through a C ABI, and `tamga-java`/`tamga-swift` bound to `tamga-c` in turn. All three went native —
+Java and Swift on 2026-08-12, `tamga-c` in its v1.3.0 — so **no repository depends on this crate any
+more**. What it is instead is the implementation every other SDK is checked *against*: the offline
+fixtures the other repos ship are run through this crate's verifier before being committed, so a
+divergence here still surfaces everywhere, just as a conformance failure rather than as a shared
+bug. Correctness in `src/crypto/` and `src/checkout/` is still the highest-priority concern in this
+repository — see the GOTCHAS section below before touching either.
 
 Protocol spec: the Tamga API protocol specification is the authoritative source for every field
 name, endpoint, and enum value this crate implements against. It is generated from the running
@@ -136,12 +141,17 @@ field's base64-encoded *string itself*, not the bytes you get after decoding it.
 backwards when porting verification logic from another language's SDK — always write the negative
 test (decoded-bytes verification must fail against a known-good fixture) alongside the positive one.
 
-**License file encryption key is intentionally not a KDF** (`src/crypto/naive_key.rs`) — raw UTF-8
-bytes of the license key, zero-padded/truncated to 32 bytes. Machine file encryption
-(`src/crypto/hkdf.rs`), by contrast, uses a real HKDF-SHA256 derivation salted with a fixed string
-and keyed on both the license key and the machine fingerprint. These are not interchangeable — do
-not "unify" them into one derivation function; that would silently break interop with either the
-`.lic` or `.mach` format depending on which direction you "fixed" it.
+**Both file formats derive their key with HKDF-SHA256, with different parameters** — and they are
+not interchangeable. License file: salt `"tamga:license-file-key-v1"`, info `"license-file"`.
+Machine file: salt `"tamga:machine-file-key-v1"`, info = the machine fingerprint, so decrypting one
+needs the fingerprint as well as the license key. Do not "unify" them into a single derivation;
+that silently breaks interop with whichever format you did not have in mind.
+
+This paragraph previously described the license-file key as "intentionally not a KDF" — the raw key
+bytes zero-padded to 32, via a `src/crypto/naive_key.rs` that no longer exists. That was true before
+offline format v2 and is not now; `src/checkout/license_file.rs` calls
+`crypto::hkdf::derive_license_file_key`. Corrected 2026-08-20 after `tamga-c`'s native rewrite was
+checked against the actual code rather than against this file.
 
 **Byte-exact JSON for offline proof** (`src/proof.rs`) — the signed payload's field order must match
 the server's exactly. The server builds it via `serde_json::json!(...)`, and `serde_json::Map` is
