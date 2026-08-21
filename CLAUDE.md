@@ -86,7 +86,8 @@ HTTP layer (`wiremock`); they never need a live Tamga API instance except when r
 Pulled from the Tamga API protocol specification → "Known Server-Side Gaps", filtered to what
 actually touches this repo.
 Read the full list there before scoping new SDK work — most of it (Analytics, EE Environments/Event
-Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
+Logs/SSO) is out of scope for this SDK entirely. Auto-update no longer is: the upgrade check is
+exposed as `Client::check_for_upgrade` — see the first bullet for the trap in its `204`.
 
 - **The upgrade-check endpoint works now, and `204` means two different things.**
   `GET /releases/actions/upgrade` used to 500 on every call — its query selected seven columns
