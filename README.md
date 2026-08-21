@@ -234,6 +234,14 @@ stayed cryptographically valid forever.
 - `Client::reset_heartbeat` and `Client::generate_offline_proof` are role-gated
   and answer `403` for **every** licence-key caller; they need an
   admin/developer/product/environment credential (`src/client.rs`).
+- `HeartbeatStatus::Dead` means only "the last ping is older than the heartbeat
+  window" — never "the machine was removed". The cull job runs only for
+  policies with `require_heartbeat` set, and that column defaults to off, so a
+  machine can report `DEAD` indefinitely while its row and its seat survive.
+  `Client::ping_heartbeat` succeeds against a `DEAD` machine and revives it, so
+  a scheduler should keep pinging through `DEAD`; treat a `404` from the ping —
+  not the status — as the signal to re-activate
+  (`src/models/machine.rs::HeartbeatStatus`).
 - Quick-validate's `last_validated_at` write is skipped whenever the request
   carries an `Origin` header, and the two responses are identical. This SDK
   never sets `Origin`, but a proxy that does turns the write off silently

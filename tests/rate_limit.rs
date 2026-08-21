@@ -162,7 +162,8 @@ async fn a_throttled_machine_heartbeat_retries_and_then_succeeds() {
     // `/actions/ping-heartbeat` does not end with `/actions/ping` — that is
     // the *process* ping route — so it needs its own entry on the
     // retryable-suffix list or every throttled heartbeat is dropped
-    // silently. Dropped heartbeats end in a culled machine, and the limiter
+    // silently. Dropped heartbeats strand the machine at DEAD — culled
+    // outright if its policy sets `require_heartbeat` — and the limiter
     // buckets per route pattern, so a whole fleet throttles itself here.
     // The write is a bare `last_heartbeat_at = NOW()`; repeating it is
     // unconditionally safe.

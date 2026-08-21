@@ -11,8 +11,12 @@
 //!   totals and the `MEMORY_LIMIT_EXCEEDED`/`DISK_LIMIT_EXCEEDED` checks.
 //! - `HeartbeatStatus`: `NOT_STARTED` → `ALIVE` → `DEAD` → `RESURRECTED`.
 //!   Window is a **hardcoded 600s (10 min)**, not driven by
-//!   `policy.heartbeat_duration`. `DEAD` should be treated as "machine
-//!   likely deleted server-side — re-activate rather than retry ping."
+//!   `policy.heartbeat_duration`. `DEAD` means **only** "the last ping is
+//!   older than that window" — it is not a tombstone. Under the default
+//!   policy (`require_heartbeat = false`) nothing is ever culled, so a
+//!   machine can report `DEAD` indefinitely with its row and its seat still
+//!   in place. Keep pinging through `DEAD`; the ping succeeds and revives
+//!   the machine. A `404` from the ping is the only row-is-gone signal.
 //! - `ComponentResource`: `machine_id`, `fingerprint`, `name`, `metadata`.
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
@@ -79,15 +83,30 @@ pub struct MachineAttributes {
 
 /// Machine heartbeat state machine: `NotStarted` → `Alive` → `Dead` →
 /// `Resurrected`. The window is a **hardcoded 600s (10 min)**, not driven
-/// by `policy.heartbeat_duration`. Treat `Dead` as "machine likely deleted
-/// server-side — re-activate rather than retry ping."
+/// by `policy.heartbeat_duration`.
+///
+/// ⚠️ **`Dead` is a staleness report, not a tombstone.** The server computes
+/// it purely from `last_heartbeat_at` versus the window and never consults
+/// `policy.require_heartbeat` on the way, but the cull job that would
+/// actually remove the row bails out unless `require_heartbeat` is set — and
+/// that column defaults to `false`. On a default policy nothing is ever
+/// culled, so a machine reports `Dead` **forever** while its row, and the
+/// seat it holds against the licence, are still there.
+///
+/// A scheduler must therefore **keep pinging through `Dead`**.
+/// [`crate::Client::ping_heartbeat`] is a bare `last_heartbeat_at = NOW()`
+/// write with no resurrection check, so it succeeds against a `Dead` machine
+/// and revives it. The row-is-gone signal is a `404`
+/// ([`crate::TamgaError::NotFound`]) from the ping itself — hang
+/// re-activation off that, never off `Dead`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatStatus {
     /// Never pinged.
     NotStarted,
     /// Pinged within the 600s window.
     Alive,
-    /// Window elapsed since the last ping.
+    /// Window elapsed since the last ping — and nothing more. Says nothing
+    /// about whether the row still exists; see the type-level doc.
     Dead,
     /// Was `Dead`, but a new ping arrived within the policy's resurrection
     /// grace period — see

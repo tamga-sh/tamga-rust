@@ -100,7 +100,7 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   a whole fleet shares one bucket per route — `ping-heartbeat` and `reset-heartbeat` therefore
   *must* stay on the retryable-suffix list. Neither ends with `/actions/ping` (that is the process
   ping route), so a suffix list without them silently drops throttled heartbeats until the machine
-  is culled.
+  is stranded at `DEAD` (and culled outright, on a `require_heartbeat` policy).
 - **Model all 24 `ValidationCode` variants, but only 16 are live.** Reachable: `VALID`,
   `SUSPENDED`, `EXPIRED`, `OVERDUE`, the four `*_SCOPE_MISMATCH`es for product/policy/user/
   environment, plus `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`, `TOO_MANY_MACHINES`,
@@ -143,6 +143,15 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   permissions the key holds. `reset-heartbeat` is the server's only way to unstick a wedged
   heartbeat job, so an embedded client has no recovery path there — it needs a back-office
   credential.
+- **`DEAD` does not mean the machine was culled — keep pinging it.** `Machine::heartbeat_status*`
+  derives the state purely from `last_heartbeat_at` versus the window and never consults
+  `require_heartbeat`, while the cull job early-returns on `!policy.require_heartbeat` and its
+  claim query filters on `AND p.require_heartbeat`. That column is `NOT NULL DEFAULT FALSE`, so on
+  a default policy **nothing is ever culled**: a machine reports `DEAD` forever with its row, and
+  the seat it holds against the licence, still in place. Pinging a `DEAD` machine succeeds and
+  revives it — the update is a bare `SET last_heartbeat_at = NOW()` with no resurrection check — so
+  a scheduler must ping *through* `DEAD` instead of stopping and re-activating on it. The only real
+  row-is-gone signal is a `404 NOT_FOUND` from the ping itself; hang re-activation off that.
 - **Auth is enforced everywhere.** A missing credential is `401`, an insufficient one `403`; the two
   are distinct states and must not be conflated in error handling. A licence key is scoped to its
   own licence — validating or checking out someone else's returns `403`. Authenticating with a

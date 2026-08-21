@@ -286,8 +286,10 @@ impl Client {
     /// every throttled machine heartbeat. That is the worst failure of the
     /// set — the rate limiter buckets per `(caller, route pattern)`, and with
     /// proxy headers untrusted an entire fleet shares one bucket on this
-    /// route, so heartbeats are exactly what gets throttled. A dropped
-    /// heartbeat eventually culls the machine. Both are bare
+    /// route, so heartbeats are exactly what gets throttled. Dropped
+    /// heartbeats strand the machine at
+    /// [`crate::models::machine::HeartbeatStatus::Dead`] — and cull it
+    /// outright on a policy that sets `require_heartbeat`. Both are bare
     /// `last_heartbeat_at` writes with no create semantics, so repeating them
     /// is unconditionally safe.
     ///
@@ -910,6 +912,19 @@ impl Client {
 
     /// `POST /machines/{machine_id}/actions/ping-heartbeat` — no body, sets
     /// `last_heartbeat_at = now`. Returns the updated machine resource.
+    ///
+    /// The write is unconditional — a bare `last_heartbeat_at = NOW()` with
+    /// no resurrection check — so this call **succeeds against a machine
+    /// already reporting
+    /// [`crate::models::machine::HeartbeatStatus::Dead`], and revives it**.
+    /// Keep the timer running through `Dead` rather than tearing it down:
+    /// `Dead` only means the last ping is older than the heartbeat window,
+    /// and on the default policy (`require_heartbeat = false`) the row is
+    /// never culled at all.
+    ///
+    /// The row-is-gone signal is a `404`
+    /// ([`crate::TamgaError::NotFound`]) from this call — that, and only
+    /// that, is the cue to re-activate with [`Self::activate_machine`].
     pub async fn ping_heartbeat(
         &self,
         machine_id: uuid::Uuid,

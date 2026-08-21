@@ -259,11 +259,21 @@ mod overage_strategy_tests {
     }
 }
 
-/// What happens to a machine row once its heartbeat window elapses.
+/// What happens to a machine row once its heartbeat window elapses — **but
+/// only on a policy that sets [`PolicyAttributes::require_heartbeat`]**.
+///
+/// ⚠️ That column is `NOT NULL DEFAULT FALSE`, and the cull job both
+/// early-returns on `!require_heartbeat` and never claims a machine whose
+/// policy has it unset. Under a default policy this enum decides nothing: no
+/// row is ever culled, whichever value it carries. Reading `DEACTIVATE_DEAD`
+/// off a policy is therefore *not* evidence that a
+/// [`crate::models::machine::HeartbeatStatus::Dead`] machine has been or will
+/// be removed — check `require_heartbeat` first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HeartbeatCullStrategy {
-    /// The machine row is deleted once dead.
+    /// The machine row is deleted once dead — if, and only if, the policy
+    /// also sets `require_heartbeat`.
     DeactivateDead,
     /// The dead machine row is kept — the license owner can still see it.
     KeepDead,
@@ -500,6 +510,13 @@ pub struct PolicyAttributes {
     /// Check-in cadence multiplier (e.g. `2` + `Week` = every 2 weeks).
     pub check_in_interval_count: Option<i32>,
     /// Whether machines under this policy must send heartbeats.
+    ///
+    /// ⚠️ Also the master switch for culling. The server's heartbeat worker
+    /// refuses to claim or process a machine whose policy leaves this
+    /// `false` — the default — so under such a policy
+    /// [`HeartbeatCullStrategy`] is inert and a
+    /// [`crate::models::machine::HeartbeatStatus::Dead`] machine keeps its
+    /// row and its seat indefinitely.
     pub require_heartbeat: bool,
     /// ⚠️ Declared here but **not actually driving the heartbeat window** —
     /// the server hardcodes 600s for machines / 30s for processes

@@ -439,3 +439,66 @@ async fn activate_machine_propagates_a_non_limit_create_failure_unchanged() {
         .await;
     assert!(matches!(result, Err(TamgaError::FingerprintTaken(_))));
 }
+
+#[tokio::test]
+async fn ping_heartbeat_succeeds_against_a_dead_machine_and_revives_it() {
+    // `DEAD` reports staleness, not deletion. The server computes it from
+    // `last_heartbeat_at` vs the window without consulting
+    // `policy.require_heartbeat`, while the cull job refuses to touch a
+    // machine unless that flag is set — and it defaults to FALSE. So on a
+    // default policy the row outlives `DEAD` indefinitely, and the ping (a
+    // bare `SET last_heartbeat_at = NOW()`, no resurrection check) still
+    // lands. A scheduler must keep pinging through `DEAD` rather than
+    // treating it as a cue to re-activate.
+    let mock_server = MockServer::start().await;
+    let machine_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/machines/{machine_id}/actions/ping-heartbeat"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": machine_resource_json(machine_id, "RESURRECTED")
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let machine = client
+        .ping_heartbeat(machine_id)
+        .await
+        .expect("pinging a DEAD machine must succeed, not fail");
+    assert_eq!(
+        machine.attributes.heartbeat_status,
+        HeartbeatStatus::Resurrected
+    );
+}
+
+#[tokio::test]
+async fn ping_heartbeat_404_is_the_only_row_is_gone_signal() {
+    // Re-activation hangs off this, not off `HeartbeatStatus::Dead`.
+    let mock_server = MockServer::start().await;
+    let machine_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/machines/{machine_id}/actions/ping-heartbeat"
+        )))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": "404",
+                "code": "NOT_FOUND",
+                "title": "Not Found",
+                "detail": "machine not found",
+                "source": null,
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let result = client.ping_heartbeat(machine_id).await;
+    assert!(matches!(result, Err(TamgaError::NotFound(_))));
+}
