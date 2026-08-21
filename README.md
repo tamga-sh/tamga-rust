@@ -20,10 +20,15 @@ later (`rust-version` in `Cargo.toml`, pinned by a dedicated MSRV job in CI).
 TLS backend is selectable: `rustls-tls` is on by default, `native-tls` is
 available instead.
 
-```toml
-[dependencies]
-tamga = { version = "0.2", default-features = false, features = ["native-tls"] }
+```bash
+cargo add tamga --no-default-features --features native-tls
 ```
+
+Deliberately not a `[dependencies]` snippet with a version in it. A literal
+version here is a copy-paste trap that only springs once: `version = "0.2"` sat
+in this README after `0.3.0` shipped, and under 0.x semantics `^0.2` cannot
+resolve `0.3.0` — anyone following it was pinned to a line that would never
+receive another release. `cargo add` writes whatever is current.
 
 ## Quickstart
 
