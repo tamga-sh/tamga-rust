@@ -22,25 +22,35 @@ use aws_lc_rs::signature::{
 };
 
 /// Verifies an RSA-PKCS1v1.5/SHA-256 `signature` over `message`.
-/// `pubkey_spki_der` is the raw SubjectPublicKeyInfo (SPKI) DER bytes.
+///
+/// `pubkey_der` is a DER-encoded PKCS#1 `RSAPublicKey` — the bare
+/// `SEQUENCE { modulus INTEGER, publicExponent INTEGER }`, which is what
+/// `aws-lc-rs` accepts and what the Tamga API's own `extract_public_key`
+/// hands out (`kp.public_key().as_ref()`). It is **not** a
+/// SubjectPublicKeyInfo blob: an SPKI-wrapped key fails to parse and every
+/// genuine signature is then reported as
+/// [`crate::error::CryptoError::VerificationFailed`]. The doc comment here
+/// said SPKI until 2026-08-21; it was checked against a server-issued
+/// machine-file fixture and corrected.
 pub fn verify_pkcs1(
-    pubkey_spki_der: &[u8],
+    pubkey_der: &[u8],
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), crate::error::CryptoError> {
-    UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, pubkey_spki_der)
+    UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, pubkey_der)
         .verify(message, signature)
         .map_err(|_| crate::error::CryptoError::VerificationFailed)
 }
 
-/// Verifies an RSA-PSS/SHA-256 `signature` over `message`. `pubkey_spki_der`
-/// is the raw SubjectPublicKeyInfo (SPKI) DER bytes.
+/// Verifies an RSA-PSS/SHA-256 `signature` over `message`. `pubkey_der` is a
+/// DER-encoded PKCS#1 `RSAPublicKey`, same as [`verify_pkcs1`] — see there
+/// for why it is not an SPKI blob.
 pub fn verify_pss(
-    pubkey_spki_der: &[u8],
+    pubkey_der: &[u8],
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), crate::error::CryptoError> {
-    UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pubkey_spki_der)
+    UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pubkey_der)
         .verify(message, signature)
         .map_err(|_| crate::error::CryptoError::VerificationFailed)
 }
@@ -55,10 +65,10 @@ mod tests {
     fn gen_rsa_keypair() -> (Vec<u8>, RsaKeyPair) {
         let kp = RsaKeyPair::generate(KeySize::Rsa2048).unwrap();
         // `.public_key()` — NOT `.as_der()`, which is the PKCS8 *private*
-        // key DER. This is the actual SPKI public key `UnparsedPublicKey`
+        // key DER. This is the DER `RSAPublicKey` that `UnparsedPublicKey`
         // expects, matching the Tamga API's own `extract_public_key`.
-        let spki = kp.public_key().as_ref().to_vec();
-        (spki, kp)
+        let public_key_der = kp.public_key().as_ref().to_vec();
+        (public_key_der, kp)
     }
 
     #[test]
