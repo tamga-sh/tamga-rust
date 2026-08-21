@@ -711,6 +711,98 @@ async fn measured_reqwest_strips_authorization_across_an_origin_boundary() {
 }
 
 #[tokio::test]
+async fn measured_a_query_string_credential_does_not_survive_either_hop() {
+    // The `?token=` transport is outside `remove_sensitive_headers` entirely
+    // — that function strips headers. What protects it is that a redirect
+    // replaces the URL, so the original query string is not carried over.
+    // Measured on both hops rather than assumed, and with a relative Location
+    // (the case where a naive implementation might merge query strings).
+    for cross_origin in [false, true] {
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/target"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&target)
+            .await;
+
+        // Cross-origin: a second server redirects to `target`. Same-origin:
+        // `target` redirects to its own /target, so the hop stays put.
+        let separate_origin = if cross_origin {
+            Some(MockServer::start().await)
+        } else {
+            None
+        };
+        let origin = separate_origin.as_ref().unwrap_or(&target);
+        let location = if cross_origin {
+            format!("{}/target", target.uri())
+        } else {
+            "/target".to_string()
+        };
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(303).insert_header("location", location.as_str()))
+            .mount(origin)
+            .await;
+
+        default_policy_client()
+            .get(format!("{}/start?token=tok-secret", origin.uri()))
+            .send()
+            .await
+            .unwrap();
+
+        let hits: Vec<Request> = target.received_requests().await.unwrap();
+        let target_hit = hits
+            .iter()
+            .find(|r| r.url.path() == "/target")
+            .expect("the redirect was followed");
+        assert!(
+            !target_hit.url.as_str().contains("tok-secret"),
+            "MEASURED: the query-string credential survived a redirect (cross_origin={cross_origin}): {}",
+            target_hit.url
+        );
+    }
+}
+
+#[tokio::test]
+async fn measured_a_directly_set_cookie_header_survives_a_same_origin_hop() {
+    // This SDK ships no cookie transport — `Cookie: Tamga-Session=<uuid>` is
+    // deliberately unimplemented (`transport.rs:16`) and reqwest's `cookies`
+    // feature is off — so nothing here leaks one today. tamga-dotnet found
+    // that a directly-set `Cookie` forwards where `Authorization` does not,
+    // so this records reqwest's behaviour now, as a standing warning against
+    // adding that transport without revisiting the redirect handling.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/target"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/target"))
+        .mount(&server)
+        .await;
+
+    default_policy_client()
+        .get(format!("{}/start", server.uri()))
+        .header("Cookie", "Tamga-Session=deadbeef")
+        .send()
+        .await
+        .unwrap();
+
+    let hits: Vec<Request> = server.received_requests().await.unwrap();
+    let target_hit = hits.iter().find(|r| r.url.path() == "/target").unwrap();
+    assert_eq!(
+        target_hit
+            .headers
+            .get("cookie")
+            .map(|v| v.to_str().unwrap()),
+        Some("Tamga-Session=deadbeef"),
+        "MEASURED: reqwest dropped a same-origin Cookie — update transport.rs:16's note"
+    );
+}
+
+#[tokio::test]
 async fn measured_reqwest_keeps_authorization_within_one_origin() {
     // The case that makes the hazard real: the server's `s3_endpoint` +
     // `s3_force_path_style` settings allow object storage on the API's own
@@ -854,4 +946,70 @@ async fn a_chunked_body_under_the_ceiling_downloads_whole() {
         .await
         .unwrap();
     assert_eq!(bytes, b"AAAAAAAABBBBBBBBCCCCCCCC");
+}
+
+// ── The server-supplied URL is not trusted to be an HTTP URL ────────────────
+
+#[tokio::test]
+async fn a_non_http_redirect_url_is_refused_by_scheme_not_by_transport_failure() {
+    // `redirectUrl` comes from the server. "It parsed" is not "it is an HTTP
+    // URL" — tamga-dotnet's absolute-URI check returned true for
+    // `/relative/path` and `C:\x\y`, both producing `file:` URIs. Each of
+    // these parses cleanly and must still be refused.
+    for (url, scheme) in [
+        ("file:///etc/passwd", "file"),
+        ("file://C:/Windows/win.ini", "file"),
+        ("ftp://example.com/artifact.bin", "ftp"),
+        ("data:text/plain;base64,SGVsbG8=", "data"),
+    ] {
+        let artifact_id = uuid::Uuid::from_u128(2);
+        let api = api_pointing_at(artifact_id, url.to_string()).await;
+
+        let err = test_client(&api)
+            .download_artifact(artifact_id, None, 1024)
+            .await
+            .unwrap_err();
+        match err {
+            ArtifactDownloadError::UnsupportedRedirectScheme { scheme: got } => {
+                assert_eq!(got, scheme, "for {url}");
+            }
+            other => panic!("expected UnsupportedRedirectScheme for {url}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_relative_redirect_url_is_refused_rather_than_resolved() {
+    // A bare path is not a URL this crate can fetch, and silently resolving
+    // it against the API's own origin would turn a malformed server response
+    // into a request to the API with no credential.
+    let artifact_id = uuid::Uuid::from_u128(2);
+    let api = api_pointing_at(artifact_id, "/relative/path".to_string()).await;
+
+    let err = test_client(&api)
+        .download_artifact(artifact_id, None, 1024)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ArtifactDownloadError::MalformedRedirectUrl),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_https_redirect_url_is_accepted() {
+    // The complement: the guard must not reject the scheme that matters.
+    // `api_and_storage` already exercises http; this pins https as allowed by
+    // checking the failure is a transport error, not a scheme rejection.
+    let artifact_id = uuid::Uuid::from_u128(2);
+    let api = api_pointing_at(artifact_id, "https://127.0.0.1:1/o/abc?sig=xyz".to_string()).await;
+
+    let err = test_client(&api)
+        .download_artifact(artifact_id, None, 1024)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ArtifactDownloadError::Fetch(_)),
+        "https must pass the scheme guard and fail at the transport, got {err:?}"
+    );
 }

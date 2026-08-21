@@ -2283,9 +2283,21 @@ impl Client {
     ///   object storage on the API's own origin, and that configuration hands
     ///   the licence key to the storage host.
     ///
-    /// The mitigation is also headers-only, so it does nothing for
-    /// [`crate::transport::AuthTransport::Query`], whose credential rides in
-    /// the query string.
+    /// The mitigation is headers-only, so it says nothing about this crate's
+    /// other transport. That was measured too: a `?token=` credential does
+    /// **not** survive either hop, because a redirect replaces the URL rather
+    /// than merging query strings
+    /// (`measured_a_query_string_credential_does_not_survive_either_hop`).
+    ///
+    /// A directly-set `Cookie` header *does* survive a same-origin hop, where
+    /// `Authorization` also would. Nothing here sends one — the cookie
+    /// transport is deliberately unimplemented
+    /// (`crate::transport`, and reqwest's `cookies` feature is off) — but
+    /// `measured_a_directly_set_cookie_header_survives_a_same_origin_hop`
+    /// records it so adding that transport cannot quietly reintroduce the
+    /// hazard. Three runtimes have already shown three different behaviours
+    /// here, so none of this is portable reasoning; it is what this reqwest
+    /// does.
     ///
     /// There is a second reason not to follow the redirect that holds in
     /// **every** configuration, credentials aside: following it buffers the
@@ -2411,6 +2423,10 @@ impl Client {
     /// [`Self::artifact_download_url`]), and
     /// [`crate::error::ArtifactDownloadError::StorageStatus`] for the storage host, most
     /// often a `403` from a URL that expired between issue and use.
+    ///
+    /// The server-supplied URL is checked to be `http`/`https` before it is
+    /// fetched — see
+    /// [`crate::error::ArtifactDownloadError::UnsupportedRedirectScheme`].
     pub async fn download_artifact(
         &self,
         artifact_id: uuid::Uuid,
@@ -2425,10 +2441,26 @@ impl Client {
             .redirect_url
             .ok_or(E::MissingRedirectUrl)?;
 
+        // `redirectUrl` is server-supplied, so this is a URL this crate did
+        // not choose. Parsing successfully does not make it an HTTP URL —
+        // `file:`, `data:` and `ftp:` all parse — so the two acceptable
+        // schemes are named explicitly. reqwest would refuse the others
+        // anyway, but as an opaque transport error rather than something a
+        // caller can act on.
+        let parsed = reqwest::Url::parse(&url).map_err(|_| E::MalformedRedirectUrl)?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(E::UnsupportedRedirectScheme {
+                    scheme: scheme.to_string(),
+                })
+            }
+        }
+
         // `self.http` carries the timeout and User-Agent but no credential:
         // auth is applied per-request in `Self::request`, which this
         // deliberately bypasses.
-        let response = self.http.get(&url).send().await.map_err(E::Fetch)?;
+        let response = self.http.get(parsed).send().await.map_err(E::Fetch)?;
 
         if !response.status().is_success() {
             return Err(E::StorageStatus {

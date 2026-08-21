@@ -641,6 +641,26 @@ pub enum ArtifactDownloadError {
     /// retry into success.
     #[error("the download response carried no redirectUrl")]
     MissingRedirectUrl,
+    /// `redirectUrl` did not parse as a URL at all.
+    #[error("the download response carried an unparseable redirectUrl")]
+    MalformedRedirectUrl,
+    /// `redirectUrl` parsed, but its scheme is neither `http` nor `https`.
+    ///
+    /// This value comes from the server, so it is a URL this crate did not
+    /// choose. "It parsed" is not the same as "it is an HTTP URL": a `file:`,
+    /// `data:` or `ftp:` URL parses perfectly well. tamga-dotnet found its
+    /// absolute-URI check returning `true` for `/relative/path` and
+    /// `C:\x\y`, both yielding `file:` URIs, which is the failure this
+    /// refuses by naming the two acceptable schemes rather than by rejecting
+    /// a blocklist.
+    ///
+    /// `reqwest` would refuse a non-HTTP scheme itself, but as an opaque
+    /// transport failure. Rejecting it here makes the cause legible.
+    #[error("redirectUrl has unsupported scheme `{scheme}` (expected http or https)")]
+    UnsupportedRedirectScheme {
+        /// The scheme as parsed, e.g. `"file"`.
+        scheme: String,
+    },
     /// The unauthenticated fetch of the presigned URL failed at the
     /// transport level (DNS, TLS, timeout, connection reset).
     #[error("failed to fetch the presigned URL: {0}")]
