@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.6](https://github.com/tamga-sh/tamga-rust/compare/v0.2.5...v0.2.6) - 2026-08-21
+
+### Bug Fixes
+
+- Align the client with the current tamga-api server contract (a8f8037)
+
+- Correct the "DEAD means the machine was culled" guidance (51bb773)
+
+- Correct the "a dead process row is deleted immediately" claim (3333077)
+
+- Reconcile the stale 14-of-24 ValidationCode counts with the live 16 (bf9973a)
+
+- The heartbeat window is policy-driven, not a hardcoded 600s (24c2676)
+
+- DEAD is not observable from any route this crate calls (f783584)
+
+- Narrow the DEAD-observability claim — checkout can report DEAD (f583c65)
+
+- Cover the three genuinely untested lines this PR added (5193ac6)
+
+- Mark ScopeObject::version and ::checksum #[deprecated] (928ca52)
+
+- Verify the machine files the server actually issues (6d4f870)
+
+- Model the wire shapes the missing read routes return (9ec931f)
+
+- Expose the machine, process, policy and upgrade routes the server has (7ebf823)
+
+- Correct the crate notes this turn's routes made stale (2575d38)
+
+- Correct the write-vs-read heartbeat rule and the fingerprint search scope (631a392)
+
+- Drop the stale 'auto-update is out of scope' line from the gotchas preamble (98671fc)
+
+- Make the fingerprint search licence-scoped only (05e93c0)
+
+
+### CI/CD
+
+- Run CI on stacked pull requests (039d4cc)
+
+
+
 ## [0.2.5](https://github.com/tamga-sh/tamga-rust/compare/v0.2.4...v0.2.5) - 2026-08-20
 
 ### Miscellaneous
