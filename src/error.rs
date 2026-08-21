@@ -85,6 +85,13 @@ pub enum TamgaError {
     ///
     /// `retry_after` is the server's `Retry-After` in seconds when it sent
     /// one. Wait at least that long before trying again.
+    ///
+    /// `response_info` carries the diagnostic response headers, including the
+    /// `x-ratelimit-*` budget the middleware attaches to the throttled
+    /// response itself
+    /// ([`crate::transport::RateLimitInfo`]). Boxed for the same reason the
+    /// [`TamgaError::Api`] payload is: an inline [`crate::transport::ResponseInfo`]
+    /// is wide enough to bloat every `Result<T, TamgaError>` slot in the crate.
     #[error("rate limited by the server{}", match retry_after {
         Some(s) => format!("; retry after {s}s"),
         None => String::new(),
@@ -92,6 +99,10 @@ pub enum TamgaError {
     RateLimited {
         /// Server-supplied `Retry-After`, in seconds.
         retry_after: Option<u64>,
+        /// Diagnostic response headers off the `429`, `x-ratelimit-*`
+        /// included. All-`None` when the response carried none — which means
+        /// no information, not an unlimited budget.
+        response_info: Box<crate::transport::ResponseInfo>,
     },
     /// `422 CHECK_IN_NOT_REQUIRED` — a **caller error**, not something to
     /// retry. Callers should check `require_check_in` on the license's
@@ -685,6 +696,7 @@ mod tests {
     fn classifiers_return_none_for_errors_without_a_server_body() {
         let err = TamgaError::RateLimited {
             retry_after: Some(5),
+            response_info: Box::default(),
         };
         assert!(err.json_api_error().is_none());
         assert_eq!(err.code(), None);

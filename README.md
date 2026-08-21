@@ -244,7 +244,14 @@ verified before.
   clamped to 60 seconds so a hostile or misconfigured proxy cannot park the
   caller (`src/client.rs::Client::retry_delay`); without it the client falls
   back to exponential backoff plus jitter
-  (`src/transport.rs::jitter_millis`). Auto-retry is scoped to every `GET`
+  (`src/transport.rs::jitter_millis`). The server also sets
+  `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` and
+  `x-ratelimit-window` on every response it rate-limits
+  (`tamga-api/src/shared/rate_limit/middleware.rs:140-143`); they are parsed
+  into `transport::RateLimitInfo` and reachable on the `response_info` field
+  of `TamgaError::RateLimited`. `reset` is an **absolute Unix timestamp**, not
+  a delay — use `RateLimitInfo::seconds_until_reset`. All-`None` means the
+  response carried no budget information, never that the budget is unlimited. Auto-retry is scoped to every `GET`
   plus seven safe `POST` actions — `validate`, `validate-key`, `check-in`,
   `check-out`, `ping`, `ping-heartbeat`, `reset-heartbeat` — and creates are
   deliberately excluded, since repeating `POST /machines` risks burning a

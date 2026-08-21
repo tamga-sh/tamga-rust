@@ -105,7 +105,7 @@ async fn a_persistently_throttled_call_surfaces_retry_after() {
         .expect_err("should surface the throttling");
 
     match err {
-        TamgaError::RateLimited { retry_after } => {
+        TamgaError::RateLimited { retry_after, .. } => {
             assert_eq!(retry_after, Some(42));
         }
         other => panic!("expected RateLimited, got {other:?}"),
@@ -129,7 +129,13 @@ async fn retries_can_be_turned_off() {
         .await
         .expect_err("should surface the 429 immediately");
 
-    assert!(matches!(err, TamgaError::RateLimited { retry_after: None }));
+    assert!(matches!(
+        err,
+        TamgaError::RateLimited {
+            retry_after: None,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -316,4 +322,80 @@ fn backoff_grows_when_the_server_says_nothing() {
         third > first,
         "backoff must grow across attempts: {first:?} then {third:?}"
     );
+}
+
+#[tokio::test]
+async fn a_throttled_response_carries_the_ratelimit_budget_headers() {
+    // The middleware attaches `x-ratelimit-*` to the `429` it is about to
+    // return, not just to the requests it lets through
+    // (`tamga-api/src/shared/rate_limit/middleware.rs:140-143`). This SDK said
+    // for a long time that no handler set them at all, so nothing read them.
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/licenses/actions/validate-key"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "3")
+                .insert_header("x-ratelimit-limit", "5")
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", "1767225603")
+                .insert_header("x-ratelimit-window", "1")
+                .insert_header("X-Request-Id", "req-throttled"),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client_without_retries(&server)
+        .validate_by_key("lic-abc123", None)
+        .await
+        .expect_err("should surface the throttling");
+
+    match err {
+        TamgaError::RateLimited {
+            retry_after,
+            response_info,
+        } => {
+            assert_eq!(retry_after, Some(3));
+            assert_eq!(response_info.rate_limit.limit, Some(5));
+            assert_eq!(response_info.rate_limit.remaining, Some(0));
+            assert_eq!(response_info.rate_limit.window, Some(1));
+            // `reset` is an absolute Unix timestamp, and `Retry-After` is the
+            // same wait expressed as a delta — the server derives the second
+            // from the first.
+            assert_eq!(
+                response_info.rate_limit.seconds_until_reset(1_767_225_600),
+                Some(3)
+            );
+            // The rest of the diagnostic block comes along for the ride.
+            assert_eq!(response_info.request_id.as_deref(), Some("req-throttled"));
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_throttled_response_without_the_headers_reports_no_information() {
+    // A deployment with no rate limiter configured, an OPTIONS preflight, or
+    // a proxy that strips them: all-`None` must not read as "unlimited".
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/licenses/actions/validate-key"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+
+    let err = client_without_retries(&server)
+        .validate_by_key("lic-abc123", None)
+        .await
+        .expect_err("should surface the throttling");
+
+    match err {
+        TamgaError::RateLimited { response_info, .. } => {
+            assert!(!response_info.rate_limit.is_present());
+            assert_eq!(response_info.rate_limit.seconds_until_reset(0), None);
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
 }

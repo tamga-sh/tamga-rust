@@ -543,7 +543,18 @@ impl Client {
         // forever and give up on the first.
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = Self::parse_retry_after(&response);
-            return crate::TamgaError::RateLimited { retry_after };
+            // Read the headers off the throttled response itself: the
+            // middleware sets `x-ratelimit-*` on the `429` as well as on the
+            // requests it lets through, and `x-ratelimit-reset` is the only
+            // one of the two wait signals that survives a proxy stripping
+            // `Retry-After`.
+            let response_info = Box::new(crate::transport::ResponseInfo::from_headers(
+                response.headers(),
+            ));
+            return crate::TamgaError::RateLimited {
+                retry_after,
+                response_info,
+            };
         }
 
         let json_api_error = match response.json::<crate::error::JsonApiErrorDocument>().await {

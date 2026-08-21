@@ -296,6 +296,19 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   never arrive.
 - **`Tamga-Environment` request header is not implemented server-side** (planned EE feature, no
   read path yet). Don't add it to the request builder.
+- **`x-ratelimit-*` IS set — the old "CORS allowlist only" note was wrong.** The rate-limit
+  middleware attaches all **four** headers (`limit`, `remaining`, `reset` and `window`) to the
+  response it is about to return, on the throttled `429` and on the requests it lets through alike
+  (`shared/rate_limit/middleware.rs:140-143`); `router.rs:123-126` merely *exposes* the same four
+  to browsers. Two live paths skip the block entirely — a deployment with no rate limiter
+  configured (`middleware.rs:94`) and an `OPTIONS` preflight (`:99-101`) — so every field is
+  `Option` and all-`None` means *no information*, never "unlimited". `x-ratelimit-reset` is an
+  **absolute Unix timestamp**; `Retry-After` is the same wait as a delta, derived from it at
+  `:147`. Sleeping for `reset` parks the caller for decades — use
+  `RateLimitInfo::seconds_until_reset`. Reachable on `TamgaError::RateLimited`'s `response_info`.
+  ⚠️ `ResponseInfo` is still **not** attached to successful responses or to non-`429` API errors in
+  this crate, so proactive backoff off `remaining` is not possible yet; that needs every method's
+  return type to change and is deliberately not in scope here.
 
 ## Critical Dependency Notes
 

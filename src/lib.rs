@@ -33,9 +33,11 @@
 //! ## Rate limiting
 //!
 //! The server does return `429 Too Many Requests`. It surfaces as
-//! [`error::TamgaError::RateLimited`] carrying the parsed `Retry-After`, and
-//! safe requests are retried automatically first — see
-//! [`client::ClientConfigBuilder::max_retries`].
+//! [`error::TamgaError::RateLimited`] carrying the parsed `Retry-After` and
+//! the response's `x-ratelimit-*` budget headers
+//! ([`transport::RateLimitInfo`]); safe requests are retried automatically
+//! first — see [`client::ClientConfigBuilder::max_retries`]. Note
+//! `x-ratelimit-reset` is an absolute Unix timestamp, not a delay.
 //!
 //! ## Auth
 //!
