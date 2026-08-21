@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1](https://github.com/tamga-sh/tamga-rust/compare/v0.3.0...v0.3.1) - 2026-08-21
+
+### Bug Fixes
+
+- Stop pinning the install snippet to a version that cannot update (293cb10)
+
+
+
 ## [0.3.0](https://github.com/tamga-sh/tamga-rust/compare/v0.2.6...v0.3.0) - 2026-08-21
 
 ### Bug Fixes
