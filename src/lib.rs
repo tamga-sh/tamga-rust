@@ -64,9 +64,35 @@
 //! - Freshly created policies report `"DENY_ACCESS"`/`"NO_RESURRECTION"` —
 //!   neither is a real variant. See [`models::policy`] for how this crate
 //!   normalizes them.
-//! - Release/auto-update checking is not part of this crate's surface. The
-//!   upgrade-check endpoint itself does work server-side; it is simply out
-//!   of scope here.
+//! - `GET /licenses/{id}` and `GET /licenses/{id}/policy` are **not**
+//!   licence-scoped server-side: unlike validate and check-out they never
+//!   call the server's `require_license_scope`, so a licence key reads any
+//!   licence in the account, `attributes.key` in plaintext included. This
+//!   crate exposes both routes because a client needs its own policy to size
+//!   a heartbeat interval; it cannot narrow what the server returns, and does
+//!   not claim to.
+//! - `GET /releases/actions/upgrade` answers `204 No Content` for two
+//!   different situations and deliberately does not distinguish them — see
+//!   [`client::UpgradeCheck::NoUpdateOffered`].
+//! - `policies.check_in_interval` stores `daily`/`weekly`/`monthly`/`yearly`
+//!   (a `CHECK` constraint admits nothing else), while the server's own
+//!   overdue calculation matches on `day`/`week`/`month`/`year` and so always
+//!   falls through to its 30-day default. Both spellings decode here; see
+//!   [`models::policy::CheckInInterval`].
+//! - The machine collection is the one **offset**-paginated route this crate
+//!   calls; every other listing is keyset. See [`models::page`].
+//!
+//! ## Heartbeat scheduling
+//!
+//! This crate ships no heartbeat scheduler — starting a background task on a
+//! caller's behalf is a decision that belongs to the embedding application.
+//! It does supply the number that task needs:
+//! [`client::Client::effective_heartbeat_window`] reads
+//! `policy.heartbeat_duration` off the licence's policy, and
+//! [`client::Client::recommended_heartbeat_interval`] divides it by
+//! [`models::policy::HEARTBEAT_INTERVAL_DIVISOR`]. Do not derive an interval
+//! from `next_heartbeat_at` on a ping response: that field is computed
+//! against the 600s fallback on precisely the routes a scheduler calls.
 
 // Promoted from `warn` to `deny` once doc coverage across the public API
 // was complete — a genuinely undocumented public item is now a build
