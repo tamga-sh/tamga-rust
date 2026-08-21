@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0](https://github.com/tamga-sh/tamga-rust/compare/v0.2.6...v0.3.0) - 2026-08-21
+
+### Bug Fixes
+
+- [**breaking**] Record the breaking surface this release carries (9a86152)
+
+
+### Documentation
+
+- Name the third path that omits the x-ratelimit-* headers (0478010)
+
+
+### Features
+
+- Surface the x-ratelimit-* headers on the response-info type (855c676)
+
+- Verify offline files against the key set their kid names (5e51455)
+
+
+
 ## [0.2.6](https://github.com/tamga-sh/tamga-rust/compare/v0.2.5...v0.2.6) - 2026-08-21
 
 ### Bug Fixes
