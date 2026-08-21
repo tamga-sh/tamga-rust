@@ -440,3 +440,23 @@ Branches: `feat/*`, `fix/*`, `chore/*`, `refactor/*`, `docs/*`
 Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat: …`, `fix: …`, etc.) —
 release-plz reads this history directly to compute the next version and generate `CHANGELOG.md`;
 an inaccurate commit type can skip a release entirely.
+
+## Release: release-plz can under-compute the bump on this crate
+
+On 2026-08-21 the release PR for the 0.3.0 content came out as **0.2.7** — a patch. The
+change was breaking: `ResponseInfo` gained `#[non_exhaustive]`, `TamgaError::RateLimited`
+gained a `response_info` field, and `CheckoutError` gained an `UnknownSigningKey` variant.
+
+`cargo semver-checks check-release`, run locally against the same `main` commit, reports
+**"semver requires new major version: 3 major and 0 minor checks failed"** — which on a 0.x
+crate is the minor slot, i.e. 0.3.0. release-plz in CI reported "✓ API compatible changes"
+on that same commit and computed a patch. Both runs used a cargo-semver-checks that carries
+all three lints, so the tool version is not the difference; what release-plz feeds it is.
+
+Shipping the patch would have been the real harm: `^0.2` resolves 0.2.7 but not 0.3.0, so
+every pinned consumer would have auto-upgraded into three breaking changes.
+
+**Until the cause is found, verify the bump before merging a release PR.** Run
+`cargo semver-checks check-release` against `main` and compare its verdict with the version
+the release PR proposes. When they disagree, a commit carrying a `BREAKING CHANGE:` trailer
+forces the correct slot — verified on a throwaway clone to produce 0.3.0, not 1.0.0.
