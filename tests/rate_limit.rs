@@ -9,6 +9,13 @@
 //! Two properties are asserted here: a throttled *idempotent* call retries and
 //! succeeds, and a throttled *create* does not retry — repeating an activation
 //! could burn a second seat, and only the caller knows if that is acceptable.
+//!
+//! The heartbeat routes get their own cases because their suffixes are easy to
+//! miss: `/actions/ping-heartbeat` and `/actions/reset-heartbeat` do not end
+//! with `/actions/ping` (that is the *process* ping route), so a
+//! retryable-suffix list written from the shorter name drops exactly the calls
+//! most likely to be throttled — the limiter buckets per route pattern, so a
+//! whole fleet on one heartbeat route shares one budget.
 
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig, TamgaError};
@@ -148,6 +155,139 @@ async fn a_throttled_machine_activation_is_not_retried() {
         .expect_err("a create must not be auto-retried");
 
     assert!(matches!(err, TamgaError::RateLimited { .. }));
+}
+
+#[tokio::test]
+async fn a_throttled_machine_heartbeat_retries_and_then_succeeds() {
+    // `/actions/ping-heartbeat` does not end with `/actions/ping` — that is
+    // the *process* ping route — so it needs its own entry on the
+    // retryable-suffix list or every throttled heartbeat is dropped
+    // silently. Dropped heartbeats strand the machine at DEAD — culled
+    // outright if its policy sets `require_heartbeat` — and the limiter
+    // buckets per route pattern, so a whole fleet throttles itself here.
+    // The write is a bare `last_heartbeat_at = NOW()`; repeating it is
+    // unconditionally safe.
+    let server = MockServer::start().await;
+    let machine_id = uuid::Uuid::nil();
+    let route = format!("/v1/accounts/acc-123/machines/{machine_id}/actions/ping-heartbeat");
+
+    Mock::given(method("POST"))
+        .and(path(route.clone()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "type": "machines",
+                "id": machine_id.to_string(),
+                "attributes": {
+                    "fingerprint": "fp-1",
+                    "cores": null, "memory": null, "disk": null, "ip": null,
+                    "hostname": null, "platform": null, "name": null,
+                    "heartbeat_status": "ALIVE",
+                    "last_heartbeat_at": "2026-01-01T00:00:00Z",
+                    "next_heartbeat_at": null, "last_check_out_at": null,
+                    "metadata": {},
+                    "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+                }
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let machine = client(&server)
+        .ping_heartbeat(machine_id)
+        .await
+        .expect("a throttled heartbeat must be retried, not dropped");
+    assert_eq!(
+        machine.attributes.heartbeat_status,
+        tamga::models::machine::HeartbeatStatus::Alive
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_heartbeat_reset_retries_and_then_succeeds() {
+    // Same reasoning as ping-heartbeat, and it matters more: reset-heartbeat
+    // is the only server-side way to unstick a wedged heartbeat job.
+    let server = MockServer::start().await;
+    let machine_id = uuid::Uuid::nil();
+    let route = format!("/v1/accounts/acc-123/machines/{machine_id}/actions/reset-heartbeat");
+
+    Mock::given(method("POST"))
+        .and(path(route.clone()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "type": "machines",
+                "id": machine_id.to_string(),
+                "attributes": {
+                    "fingerprint": "fp-1",
+                    "cores": null, "memory": null, "disk": null, "ip": null,
+                    "hostname": null, "platform": null, "name": null,
+                    "heartbeat_status": "NOT_STARTED",
+                    "last_heartbeat_at": null,
+                    "next_heartbeat_at": null, "last_check_out_at": null,
+                    "metadata": {},
+                    "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+                }
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let machine = client(&server)
+        .reset_heartbeat(machine_id)
+        .await
+        .expect("a throttled heartbeat reset must be retried, not dropped");
+    assert_eq!(
+        machine.attributes.heartbeat_status,
+        tamga::models::machine::HeartbeatStatus::NotStarted
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_raw_pem_checkout_retries_and_then_succeeds() {
+    // The raw-PEM checkout helpers used to send directly, outside the retry
+    // wrapper, while the module doc claimed every GET was retried. Both are
+    // GETs and both are safe to repeat.
+    let server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let route = format!("/v1/accounts/acc-123/licenses/{license_id}/actions/check-out");
+
+    Mock::given(method("GET"))
+        .and(path(route.clone()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(200).set_body_string("-----BEGIN LICENSE FILE-----"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pem = client(&server)
+        .check_out_license(license_id, false, None)
+        .await
+        .expect("a throttled check-out must be retried");
+    assert!(pem.starts_with("-----BEGIN LICENSE FILE-----"));
 }
 
 #[test]

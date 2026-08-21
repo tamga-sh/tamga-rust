@@ -17,6 +17,25 @@
 //!   `LICENSE_KEY_MISSING`, `SCHEME_NOT_SUPPORTED`, `DATASET_INVALID` (422
 //!   validation failures). Any other code falls through to
 //!   [`TamgaError::Api`].
+//! - Codes without a dedicated variant still arrive intact on
+//!   [`TamgaError::Api`], which carries the server's `code` verbatim. Two
+//!   families of them matter enough to have first-class classifiers rather
+//!   than string comparisons at each call site:
+//!   - [`LimitExceededCode`] — the **create-time** `422`s
+//!     (`MACHINE_LIMIT_EXCEEDED`, `CORE_LIMIT_EXCEEDED`,
+//!     `MEMORY_LIMIT_EXCEEDED`, `DISK_LIMIT_EXCEEDED`,
+//!     `TOO_MANY_PROCESSES`). These are the same limits validation reports,
+//!     refused earlier; [`LimitExceededCode::as_validation_code`] maps each
+//!     one onto its
+//!     [`crate::models::validation::ValidationCode`] equivalent.
+//!   - [`LicenseAuthCode`] — the `401`s the licence-key auth gate produces
+//!     (`LICENSE_SUSPENDED`, `LICENSE_EXPIRED`, `LICENSE_NOT_ALLOWED`).
+//!     None of the three is transient; retrying makes none of them pass.
+//! - Reach those two via [`TamgaError::limit_exceeded`],
+//!   [`TamgaError::license_auth_failure`], or the raw
+//!   [`TamgaError::code`]/[`TamgaError::json_api_error`] accessors. No new
+//!   `TamgaError` variant is added for them — the enum is exhaustive and
+//!   public, so growing it is a breaking change.
 //! - `429 TOO_MANY_REQUESTS` is live. Credential-accepting endpoints (session
 //!   creation, password reset, licence-key validation, token minting) run on a
 //!   tight per-IP budget — 5 requests/second by default — which a heartbeat
@@ -27,6 +46,14 @@
 //! - `CHECK_IN_NOT_REQUIRED` (422) is a **caller error**, not something to
 //!   retry — callers should check `require_check_in` on the license's
 //!   policy before scheduling periodic check-ins.
+//! - **Auth is enforced server-side.** A missing or unrecognized credential
+//!   is `401 UNAUTHORIZED`; a valid credential that is not permitted for the
+//!   operation is `403 FORBIDDEN`. The two are distinct states — do not
+//!   conflate them. Licence-key auth additionally requires the licence's
+//!   policy to set `authentication_strategy` to `LICENSE` or `MIXED`; the
+//!   column defaults to `'TOKEN'`, under which every licence-key request is
+//!   refused with `401 LICENSE_NOT_ALLOWED`. That is a provisioning
+//!   precondition, not a transient failure — see [`LicenseAuthCode`].
 
 /// Top-level SDK error type.
 ///
@@ -119,14 +146,22 @@ pub enum TamgaError {
     /// belong to this account).
     #[error("not found: {detail}", detail = .0.detail)]
     NotFound(Box<JsonApiError>),
-    /// `401 UNAUTHORIZED` — missing or invalid credentials. Not currently
-    /// reachable on the license/machine endpoints this crate calls (see
-    /// module doc comment — auth isn't enforced there yet), but modeled
-    /// for forward-compatibility and any endpoint where it already applies.
+    /// `401 UNAUTHORIZED` — missing or unrecognized credentials. Reachable
+    /// on every endpoint this crate calls: auth **is** enforced
+    /// server-side.
+    ///
+    /// Note that the licence-key auth gate has its own `401` codes
+    /// (`LICENSE_SUSPENDED`, `LICENSE_EXPIRED`, `LICENSE_NOT_ALLOWED`)
+    /// which arrive on [`TamgaError::Api`], not here — see
+    /// [`LicenseAuthCode`] and [`TamgaError::license_auth_failure`].
     #[error("unauthorized: {detail}", detail = .0.detail)]
     Unauthorized(Box<JsonApiError>),
     /// `403 FORBIDDEN` — credentials valid, but not permitted for this
-    /// operation.
+    /// operation. A licence key is scoped to its own licence, so validating
+    /// or checking out another licence lands here; so do the two endpoints
+    /// a `LicenseToken` role can never call
+    /// ([`crate::Client::reset_heartbeat`],
+    /// [`crate::Client::generate_offline_proof`]).
     #[error("forbidden: {detail}", detail = .0.detail)]
     Forbidden(Box<JsonApiError>),
     /// `500 INTERNAL_SERVER_ERROR` — generic server-side failure. The
@@ -134,6 +169,130 @@ pub enum TamgaError {
     /// don't expect this to be more specific than "something went wrong."
     #[error("internal server error: {detail}", detail = .0.detail)]
     InternalServerError(Box<JsonApiError>),
+}
+
+/// A server error code meaning "this policy limit is already reached".
+///
+/// These are **creation-time** `422`s: the server refuses to register the
+/// machine or process at all rather than letting it in and reporting the
+/// overage on the next validate. Which of the two happens is decided by the
+/// policy's overage strategy — under `ALLOW_ACCESS` /
+/// `ALLOW_1_25X_OVERAGE` and friends creation still succeeds and the limit
+/// surfaces only at validate, so a client has to handle **both** paths.
+/// [`crate::Client::activate_machine`] does.
+///
+/// Each of these has an exactly equivalent
+/// [`crate::models::validation::ValidationCode`] — the same limit, reported
+/// by the other endpoint — via [`Self::as_validation_code`]. Normalizing to
+/// that lets a caller write the over-limit branch once.
+///
+/// Non-exhaustive: the server may add limits, and matching one here must not
+/// become a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitExceededCode {
+    /// `MACHINE_LIMIT_EXCEEDED` — `policy.max_machines` reached.
+    MachineLimitExceeded,
+    /// `CORE_LIMIT_EXCEEDED` — `policy.max_cores` reached.
+    CoreLimitExceeded,
+    /// `MEMORY_LIMIT_EXCEEDED` — `policy.max_memory` reached. The machine's
+    /// `memory` is counted in **megabytes** — see
+    /// [`crate::client::CreateMachineOptions::memory`].
+    MemoryLimitExceeded,
+    /// `DISK_LIMIT_EXCEEDED` — `policy.max_disk` reached. Counted in
+    /// **megabytes**, like `memory`.
+    DiskLimitExceeded,
+    /// `TOO_MANY_PROCESSES` — `policy.max_processes` reached. Unlike the
+    /// other four this code is spelled identically on both the create-time
+    /// and the validation side.
+    TooManyProcesses,
+}
+
+impl LimitExceededCode {
+    /// Parses a server `code` string, returning `None` for anything that is
+    /// not one of these limit codes.
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "MACHINE_LIMIT_EXCEEDED" => Some(LimitExceededCode::MachineLimitExceeded),
+            "CORE_LIMIT_EXCEEDED" => Some(LimitExceededCode::CoreLimitExceeded),
+            "MEMORY_LIMIT_EXCEEDED" => Some(LimitExceededCode::MemoryLimitExceeded),
+            "DISK_LIMIT_EXCEEDED" => Some(LimitExceededCode::DiskLimitExceeded),
+            "TOO_MANY_PROCESSES" => Some(LimitExceededCode::TooManyProcesses),
+            _ => None,
+        }
+    }
+
+    /// The wire string this code is spelled as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LimitExceededCode::MachineLimitExceeded => "MACHINE_LIMIT_EXCEEDED",
+            LimitExceededCode::CoreLimitExceeded => "CORE_LIMIT_EXCEEDED",
+            LimitExceededCode::MemoryLimitExceeded => "MEMORY_LIMIT_EXCEEDED",
+            LimitExceededCode::DiskLimitExceeded => "DISK_LIMIT_EXCEEDED",
+            LimitExceededCode::TooManyProcesses => "TOO_MANY_PROCESSES",
+        }
+    }
+
+    /// The validation code reporting this same limit on the validate
+    /// endpoint. Lets one over-limit branch serve both the create-time
+    /// `422` and the validate-time outcome.
+    pub fn as_validation_code(self) -> crate::models::validation::ValidationCode {
+        use crate::models::validation::ValidationCode;
+        match self {
+            LimitExceededCode::MachineLimitExceeded => ValidationCode::TooManyMachines,
+            LimitExceededCode::CoreLimitExceeded => ValidationCode::TooManyCores,
+            LimitExceededCode::MemoryLimitExceeded => ValidationCode::TooMuchMemory,
+            LimitExceededCode::DiskLimitExceeded => ValidationCode::TooMuchDisk,
+            LimitExceededCode::TooManyProcesses => ValidationCode::TooManyProcesses,
+        }
+    }
+}
+
+/// A `401` from the licence-key auth gate, before any endpoint logic runs.
+///
+/// All three are **configuration or lifecycle** states, not transient
+/// failures: retrying, backing off, or re-sending the same key changes
+/// nothing. In particular `LICENSE_NOT_ALLOWED` means the licence's policy
+/// has `authentication_strategy` set to `TOKEN` (the column default) or
+/// `NONE`, neither of which accepts a licence key as a credential at all —
+/// the fix is provisioning the policy as `LICENSE` or `MIXED`, not client-side
+/// retry logic. See [`crate::models::policy::AuthenticationStrategy`].
+///
+/// Non-exhaustive for the same reason as [`LimitExceededCode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LicenseAuthCode {
+    /// `LICENSE_SUSPENDED` — the licence itself is suspended.
+    LicenseSuspended,
+    /// `LICENSE_EXPIRED` — the licence has expired **and** its policy's
+    /// expiration strategy is `REVOKE_ACCESS`. Under `MAINTAIN_ACCESS`,
+    /// `ALLOW_ACCESS` or `RESTRICT_ACCESS` an expired licence still
+    /// authenticates and the expiry surfaces at validate instead.
+    LicenseExpired,
+    /// `LICENSE_NOT_ALLOWED` — the policy does not accept licence-key auth.
+    LicenseNotAllowed,
+}
+
+impl LicenseAuthCode {
+    /// Parses a server `code` string, returning `None` for anything that is
+    /// not one of these auth-gate codes.
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "LICENSE_SUSPENDED" => Some(LicenseAuthCode::LicenseSuspended),
+            "LICENSE_EXPIRED" => Some(LicenseAuthCode::LicenseExpired),
+            "LICENSE_NOT_ALLOWED" => Some(LicenseAuthCode::LicenseNotAllowed),
+            _ => None,
+        }
+    }
+
+    /// The wire string this code is spelled as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LicenseAuthCode::LicenseSuspended => "LICENSE_SUSPENDED",
+            LicenseAuthCode::LicenseExpired => "LICENSE_EXPIRED",
+            LicenseAuthCode::LicenseNotAllowed => "LICENSE_NOT_ALLOWED",
+        }
+    }
 }
 
 /// Failures while parsing or verifying a machine offline proof string
@@ -237,11 +396,71 @@ pub enum CheckoutError {
 }
 
 impl TamgaError {
+    /// The underlying JSON:API error object, for any variant that carries
+    /// one. `None` for the transport (`Http`, `Json`), rate-limit and
+    /// offline-verification variants, which never have a server error body.
+    ///
+    /// This is the single accessor the code-based helpers below are built
+    /// on: match on [`JsonApiError::code`] (stable), never `detail` (human
+    /// text, may be reworded).
+    pub fn json_api_error(&self) -> Option<&JsonApiError> {
+        match self {
+            TamgaError::Api(err)
+            | TamgaError::CheckInNotRequired(err)
+            | TamgaError::LicenseNotEncrypted(err)
+            | TamgaError::LicenseKeyMissingApi(err)
+            | TamgaError::TtlInvalidApi(err)
+            | TamgaError::SchemeNotSupportedApi(err)
+            | TamgaError::FingerprintTaken(err)
+            | TamgaError::DatasetInvalid(err)
+            | TamgaError::PidTaken(err)
+            | TamgaError::NotFound(err)
+            | TamgaError::Unauthorized(err)
+            | TamgaError::Forbidden(err)
+            | TamgaError::InternalServerError(err) => Some(err),
+            TamgaError::Http(_)
+            | TamgaError::Json(_)
+            | TamgaError::RateLimited { .. }
+            | TamgaError::Checkout(_)
+            | TamgaError::Proof(_) => None,
+        }
+    }
+
+    /// The server's stable error `code`, for any variant carrying a
+    /// [`JsonApiError`]. Shorthand for
+    /// `self.json_api_error().map(|e| e.code.as_str())`.
+    ///
+    /// Useful for codes without a dedicated variant — `SCOPE_NOT_SUPPORTED`
+    /// (the `422` that `scope.version`/`scope.checksum` provoke),
+    /// `ENTITLEMENT_ALREADY_INHERITED`, `POLICY_ENTITLEMENT`, and so on.
+    pub fn code(&self) -> Option<&str> {
+        self.json_api_error().map(|err| err.code.as_str())
+    }
+
+    /// Classifies this error as a create-time policy-limit refusal, if it is
+    /// one. See [`LimitExceededCode`].
+    pub fn limit_exceeded(&self) -> Option<LimitExceededCode> {
+        self.code().and_then(LimitExceededCode::parse)
+    }
+
+    /// Classifies this error as a licence-key auth-gate `401`, if it is one.
+    /// See [`LicenseAuthCode`].
+    pub fn license_auth_failure(&self) -> Option<LicenseAuthCode> {
+        self.code().and_then(LicenseAuthCode::parse)
+    }
+
     /// Maps a parsed [`JsonApiError`] to its most specific [`TamgaError`]
     /// variant, falling back to the generic [`TamgaError::Api`] for any
     /// `code` without a dedicated variant. Single dispatch point: a newly
     /// typed code needs a match arm here, not a new call site at every
     /// endpoint method.
+    ///
+    /// The fallback loses nothing — [`TamgaError::Api`] carries the
+    /// server's `code` verbatim, and
+    /// [`TamgaError::limit_exceeded`]/[`TamgaError::license_auth_failure`]
+    /// classify the two families that matter without needing variants of
+    /// their own (which this enum, being public and exhaustive, cannot grow
+    /// without a breaking release).
     pub(crate) fn from_json_api_error(err: JsonApiError) -> Self {
         match err.code.as_str() {
             "CHECK_IN_NOT_REQUIRED" => TamgaError::CheckInNotRequired(Box::new(err)),
@@ -343,18 +562,142 @@ mod tests {
     fn unrecognized_code_maps_to_generic_api_variant() {
         let err = JsonApiError {
             id: "01926b3e-0000-7000-8000-000000000000".to_string(),
-            status: "429".to_string(),
-            code: "TOO_MANY_REQUESTS".to_string(),
-            title: "Too Many Requests".to_string(),
-            // Not modeled: the server declares this code but never
-            // constructs/returns it today (see CLAUDE.md's GOTCHAS) — a
-            // genuinely code-without-a-dedicated-variant example, unlike
-            // NOT_FOUND/etc. which now have their own typed variants.
-            detail: "rate limited".to_string(),
+            status: "422".to_string(),
+            // Live server code with no dedicated variant: `scope.version`
+            // or `scope.checksum` on validate fails the whole call with
+            // this. Deliberately left on the generic `Api` path — see
+            // `models::validation::ScopeObject`.
+            code: "SCOPE_NOT_SUPPORTED".to_string(),
+            title: "Unprocessable Entity".to_string(),
+            detail: "scope.version is not supported".to_string(),
             source: None,
         };
         let mapped = TamgaError::from_json_api_error(err);
         assert!(matches!(mapped, TamgaError::Api(_)));
+        assert_eq!(mapped.code(), Some("SCOPE_NOT_SUPPORTED"));
+    }
+
+    fn error_with_code(status: &str, code: &str) -> TamgaError {
+        TamgaError::from_json_api_error(JsonApiError {
+            id: "01926b3e-0000-7000-8000-000000000000".to_string(),
+            status: status.to_string(),
+            code: code.to_string(),
+            title: String::new(),
+            detail: String::new(),
+            source: None,
+        })
+    }
+
+    #[test]
+    fn create_time_limit_codes_classify_and_map_onto_validation_codes() {
+        use crate::models::validation::ValidationCode;
+        let cases = [
+            (
+                "MACHINE_LIMIT_EXCEEDED",
+                LimitExceededCode::MachineLimitExceeded,
+                ValidationCode::TooManyMachines,
+            ),
+            (
+                "CORE_LIMIT_EXCEEDED",
+                LimitExceededCode::CoreLimitExceeded,
+                ValidationCode::TooManyCores,
+            ),
+            (
+                "MEMORY_LIMIT_EXCEEDED",
+                LimitExceededCode::MemoryLimitExceeded,
+                ValidationCode::TooMuchMemory,
+            ),
+            (
+                "DISK_LIMIT_EXCEEDED",
+                LimitExceededCode::DiskLimitExceeded,
+                ValidationCode::TooMuchDisk,
+            ),
+            (
+                "TOO_MANY_PROCESSES",
+                LimitExceededCode::TooManyProcesses,
+                ValidationCode::TooManyProcesses,
+            ),
+        ];
+        for (wire, expected, validation) in cases {
+            // The server sends `status` as a JSON string, not a number.
+            let err = error_with_code("422", wire);
+            assert_eq!(err.limit_exceeded(), Some(expected), "code {wire}");
+            assert_eq!(expected.as_str(), wire);
+            assert_eq!(expected.as_validation_code(), validation, "code {wire}");
+        }
+    }
+
+    #[test]
+    fn license_auth_gate_codes_classify() {
+        let cases = [
+            ("LICENSE_SUSPENDED", LicenseAuthCode::LicenseSuspended),
+            ("LICENSE_EXPIRED", LicenseAuthCode::LicenseExpired),
+            ("LICENSE_NOT_ALLOWED", LicenseAuthCode::LicenseNotAllowed),
+        ];
+        for (wire, expected) in cases {
+            let err = error_with_code("401", wire);
+            assert_eq!(err.license_auth_failure(), Some(expected), "code {wire}");
+            assert_eq!(expected.as_str(), wire);
+            // These are auth-gate codes, not limit codes.
+            assert_eq!(err.limit_exceeded(), None, "code {wire}");
+        }
+    }
+
+    #[test]
+    fn every_code_carrying_variant_still_exposes_its_code() {
+        // `from_json_api_error` and `json_api_error` are two hand-written
+        // match arms over the same vocabulary: the first maps a wire code
+        // onto a typed variant, the second lists every variant that still
+        // carries the server body. The compiler forces the second to mention
+        // a new variant, but not to put it in the right group — dropping one
+        // into the `None` arm would silently break `code()`, and with it
+        // `limit_exceeded` and `license_auth_failure`, which are built on it.
+        // Round-trip every mapped code to keep the two in step.
+        let carries_a_body = [
+            "CHECK_IN_NOT_REQUIRED",
+            "LICENSE_NOT_ENCRYPTED",
+            "LICENSE_KEY_MISSING",
+            "FINGERPRINT_TAKEN",
+            "PID_TAKEN",
+            "NOT_FOUND",
+            "UNAUTHORIZED",
+            "FORBIDDEN",
+            "INTERNAL_SERVER_ERROR",
+            "DATASET_INVALID",
+            "TTL_INVALID",
+            "SCHEME_NOT_SUPPORTED",
+            // No dedicated variant — falls back to `Api`, which carries the
+            // body just the same. This is the route every un-typed code
+            // takes, including `SCOPE_NOT_SUPPORTED`.
+            "SCOPE_NOT_SUPPORTED",
+        ];
+        for wire in carries_a_body {
+            let err = error_with_code("422", wire);
+            assert!(
+                err.json_api_error().is_some(),
+                "{wire} lost its server error body"
+            );
+            assert_eq!(err.code(), Some(wire), "code {wire}");
+        }
+    }
+
+    #[test]
+    fn classifiers_return_none_for_errors_without_a_server_body() {
+        let err = TamgaError::RateLimited {
+            retry_after: Some(5),
+        };
+        assert!(err.json_api_error().is_none());
+        assert_eq!(err.code(), None);
+        assert_eq!(err.limit_exceeded(), None);
+        assert_eq!(err.license_auth_failure(), None);
+    }
+
+    #[test]
+    fn json_api_error_is_readable_through_a_typed_variant_too() {
+        let err = error_with_code("404", "NOT_FOUND");
+        assert!(matches!(err, TamgaError::NotFound(_)));
+        assert_eq!(err.code(), Some("NOT_FOUND"));
+        assert_eq!(err.json_api_error().unwrap().status, "404");
     }
 
     #[test]
