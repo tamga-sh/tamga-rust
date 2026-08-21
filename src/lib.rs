@@ -105,6 +105,45 @@
 //!   rotation only ever mints Ed25519 keys, so `kid` is meaningful for
 //!   Ed25519-signed files only. See [`checkout::key_set`].
 //!
+//! ## Artifacts and the download redirect
+//!
+//! `Role::LicenseToken` already held `artifact.read`, so
+//! [`Client::list_release_artifacts`] and [`Client::get_artifact`] were
+//! always reachable with a licence key. The blocked half was fetching the
+//! bytes: the server granted `artifact.download` to that role only recently,
+//! and until then [`Client::artifact_download_url`] would have been `403`.
+//! Create, update, delete and upload are **not** modelled — those
+//! permissions are absent from the role, so a licence key cannot reach
+//! them.
+//!
+//! The download action answers `303 See Other` to a short-lived presigned
+//! storage URL by default. This crate never lets that redirect be followed
+//! with a credential attached: it sends `?redirect=false` and issues the
+//! request on a redirect-disabled client, then hands back the URL for an
+//! **unauthenticated** fetch. [`Client::download_artifact`] does that fetch
+//! and takes a required `max_bytes` ceiling, since the server admits uploads
+//! up to 1 GiB. Treat the presigned URL as a bearer capability and keep it
+//! out of logs.
+//!
+//! A `403` from the download action is not necessarily an auth problem: it
+//! enforces the owning release's access gate (distribution strategy,
+//! suspension, expiry, entitlement) on top of the permission, so a CLOSED
+//! release's binary is refused to a caller in perfect standing. The listing
+//! and show routes do not apply that gate, so metadata reading while the
+//! download is refused is the expected shape of it.
+//!
+//! ## Fingerprints
+//!
+//! The server stores `fingerprint TEXT NOT NULL` with no normalisation,
+//! unique per `(license_id, fingerprint)` — so `"ABC-123"`, `"abc-123"` and
+//! `" ABC-123 "` are three machines on three seats.
+//! [`fingerprint::compute`] canonicalizes caller-chosen labelled components
+//! into one stable string first. It reads no hardware identifiers — what
+//! identifies a machine is a product decision — and it deliberately performs
+//! no Unicode normalisation, because a rule the eight Tamga SDKs cannot
+//! implement identically would yield two fingerprints for one machine
+//! depending on which SDK the application used.
+//!
 //! ## Heartbeat scheduling
 //!
 //! This crate ships no heartbeat scheduler — starting a background task on a
