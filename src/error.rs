@@ -557,6 +557,115 @@ pub(crate) struct JsonApiErrorDocument {
     pub errors: Vec<JsonApiError>,
 }
 
+/// Rejections from [`crate::fingerprint::canonical`] and
+/// [`crate::fingerprint::compute`].
+///
+/// Every variant is a refusal, never a silent repair. Stripping a control
+/// character or collapsing a repeated label would map two *different* inputs
+/// onto one canonical string, and therefore onto one seat — the exact class
+/// of bug the canonicalizer exists to prevent. A caller that would rather
+/// coerce than fail must do so itself, visibly, before calling.
+///
+/// `#[non_exhaustive]`: [`TamgaError`] is not, and adding a variant to it
+/// would be a breaking change. This enum is declared closed-to-external-
+/// matching from its first release so a future validation rule stays a patch.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FingerprintError {
+    /// No components were supplied. Hashing the bare domain prefix would give
+    /// every caller who passes an empty collection the same fingerprint —
+    /// a single shared seat — so it is refused instead.
+    #[error("at least one component is required")]
+    NoComponents,
+    /// A label was the empty string.
+    #[error("component label must not be empty")]
+    EmptyLabel,
+    /// A label held a byte outside ASCII printable `0x21..=0x7E`, or held
+    /// `'='`.
+    ///
+    /// `'='` would make the `label=value` split ambiguous. Non-ASCII is
+    /// refused so a label can never itself need Unicode normalisation — see
+    /// the module doc comment on [`crate::fingerprint`] for why no port of
+    /// this SDK normalises anything.
+    ///
+    /// The offending label is Debug-formatted, so a control character in it
+    /// is escaped rather than written raw into a log line.
+    #[error("invalid label {label:?}: labels are ASCII printable 0x21..=0x7E, excluding '='")]
+    InvalidLabel {
+        /// The label as supplied.
+        label: String,
+    },
+    /// The same label appeared twice.
+    ///
+    /// Not deduplicated: two values for one label is a caller bug, and
+    /// silently picking one of them hides it.
+    #[error("duplicate label {label:?}: two values for one label is a caller bug")]
+    DuplicateLabel {
+        /// The label that repeated.
+        label: String,
+    },
+    /// A value still held an ASCII control character (`0x00..=0x1F` or
+    /// `0x7F`) after ASCII whitespace was trimmed from both ends.
+    ///
+    /// The unit separator `0x1F` lands here too: it is the field separator of
+    /// the canonical string, so a value containing one could forge an extra
+    /// component.
+    #[error("value for label {label:?} contains an ASCII control character")]
+    ControlCharacterInValue {
+        /// The label whose value was rejected. The value itself is not
+        /// echoed — it is caller-chosen machine identity material.
+        label: String,
+    },
+}
+
+/// Failures from [`crate::Client::download_artifact`], which spans two
+/// different hosts: the Tamga API, then the storage backend the API
+/// presigns a URL on.
+///
+/// Kept separate from [`TamgaError`] because a storage-side failure is not
+/// an API failure — a `403` from S3 means the presigned URL expired between
+/// issue and use, which calls for re-requesting the URL, not for
+/// re-authenticating with Tamga.
+///
+/// `#[non_exhaustive]` for the same reason as [`FingerprintError`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ArtifactDownloadError {
+    /// The Tamga API call that issues the presigned URL failed.
+    #[error("failed to obtain a download URL: {0}")]
+    Api(#[from] TamgaError),
+    /// The API answered `200` but left `redirectUrl` absent.
+    ///
+    /// The download action is the only route that populates it, so this
+    /// means the server changed shape — it is not a condition a caller can
+    /// retry into success.
+    #[error("the download response carried no redirectUrl")]
+    MissingRedirectUrl,
+    /// The unauthenticated fetch of the presigned URL failed at the
+    /// transport level (DNS, TLS, timeout, connection reset).
+    #[error("failed to fetch the presigned URL: {0}")]
+    Fetch(#[source] reqwest::Error),
+    /// The storage host answered a non-success status.
+    ///
+    /// Most often `403` — a presigned URL is short-lived and this one had
+    /// already expired. Request a fresh one rather than retrying this URL.
+    #[error("storage host answered HTTP {status}")]
+    StorageStatus {
+        /// The status code the storage host returned.
+        status: u16,
+    },
+    /// The artifact exceeded the `max_bytes` ceiling the caller passed.
+    ///
+    /// The server admits uploads up to 1 GiB, so buffering an artifact into
+    /// memory unbounded is a real exhaustion risk; the ceiling is required
+    /// rather than defaulted so the number is always a caller's decision.
+    #[error("artifact exceeds the {limit}-byte ceiling supplied by the caller")]
+    TooLarge {
+        /// The ceiling that was exceeded, in bytes.
+        limit: u64,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

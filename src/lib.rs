@@ -126,6 +126,7 @@ pub mod checkout;
 pub mod client;
 pub mod crypto;
 pub mod error;
+pub mod fingerprint;
 pub mod models;
 pub mod proof;
 pub mod transport;
