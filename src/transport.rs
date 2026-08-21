@@ -161,6 +161,9 @@ pub const DEFAULT_API_VERSION: &str = "1.8";
 ///   deployment has no rate limiter configured at all (`middleware.rs:94`);
 /// - and for an `OPTIONS` preflight, which the CORS layer answers
 ///   (`middleware.rs:99-101`);
+/// - and the middleware is installed with `route_layer`, not `layer`
+///   (`router.rs:62-66`), so a request that matches no route 404s without
+///   ever running it;
 /// - and any proxy in front of the API may strip or rewrite them.
 ///
 /// Absent headers are therefore not an error and not a sign of an unlimited

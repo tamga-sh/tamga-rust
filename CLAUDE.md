@@ -301,8 +301,11 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   response it is about to return, on the throttled `429` and on the requests it lets through alike
   (`shared/rate_limit/middleware.rs:140-143`); `router.rs:123-126` merely *exposes* the same four
   to browsers. Two live paths skip the block entirely — a deployment with no rate limiter
-  configured (`middleware.rs:94`) and an `OPTIONS` preflight (`:99-101`) — so every field is
-  `Option` and all-`None` means *no information*, never "unlimited". `x-ratelimit-reset` is an
+  configured (`middleware.rs:94`) and an `OPTIONS` preflight (`:99-101`) — and it is installed
+  with `route_layer` rather than `layer` (`router.rs:62-66`), so an unmatched path 404s without it
+  ever running. Hence every field is `Option`: all-`None` means *no information*, never
+  "unlimited", and a caller that reads a missing `remaining` as `0` throttles itself against a
+  server that is not limiting it. `x-ratelimit-reset` is an
   **absolute Unix timestamp**; `Retry-After` is the same wait as a delta, derived from it at
   `:147`. Sleeping for `reset` parks the caller for decades — use
   `RateLimitInfo::seconds_until_reset`. Reachable on `TamgaError::RateLimited`'s `response_info`.
