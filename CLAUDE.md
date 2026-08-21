@@ -296,6 +296,38 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   never arrive.
 - **`Tamga-Environment` request header is not implemented server-side** (planned EE feature, no
   read path yet). Don't add it to the request builder.
+- **`x-ratelimit-*` IS set — the old "CORS allowlist only" note was wrong.** The rate-limit
+  middleware attaches all **four** headers (`limit`, `remaining`, `reset` and `window`) to the
+  response it is about to return, on the throttled `429` and on the requests it lets through alike
+  (`shared/rate_limit/middleware.rs:140-143`); `router.rs:123-126` merely *exposes* the same four
+  to browsers. Two live paths skip the block entirely — a deployment with no rate limiter
+  configured (`middleware.rs:94`) and an `OPTIONS` preflight (`:99-101`) — and it is installed
+  with `route_layer` rather than `layer` (`router.rs:62-66`), so an unmatched path 404s without it
+  ever running. Hence every field is `Option`: all-`None` means *no information*, never
+  "unlimited", and a caller that reads a missing `remaining` as `0` throttles itself against a
+  server that is not limiting it. `x-ratelimit-reset` is an
+  **absolute Unix timestamp**; `Retry-After` is the same wait as a delta, derived from it at
+  `:147`. Sleeping for `reset` parks the caller for decades — use
+  `RateLimitInfo::seconds_until_reset`. Reachable on `TamgaError::RateLimited`'s `response_info`.
+  ⚠️ `ResponseInfo` is still **not** attached to successful responses or to non-`429` API errors in
+  this crate, so proactive backoff off `remaining` is not possible yet; that needs every method's
+  return type to change and is deliberately not in scope here.
+- **`kid` is an Ed25519-only concept, and the key set only publishes Ed25519 keys.**
+  `check_out_license.rs:92` and `check_out_machine.rs:125` both compute the claim as
+  `key_id(account.ed25519_public_key.unwrap_or_default())` — **whatever scheme signed the file**.
+  So an ECDSA- or RSA-signed `.mach` file carries a `kid` naming a key that did not sign it, and
+  `rotate_ed25519` never touches the account's RSA/ECDSA keys or publishes them. Hence
+  `verify_machine_file_with_key_set` takes no `scheme` and refuses anything but `ed25519`;
+  `.lic` files are unaffected, being Ed25519-signed always. Note the `unwrap_or_default()`: an
+  account whose public-key column was never backfilled signs every file with `key_id("")` =
+  `e3b0c44298fc1c14`.
+- **A licence key cannot call `GET /signing-keys` either.** Same shape as the `GET /policies/{id}`
+  bullet above — `AccountPolicy::can_read` requires `account.read` and `Role::LicenseToken`'s fixed
+  permission set (`shared/authz/mod.rs:236-261`) does not include it, so `403` for every raw
+  licence-key caller. Unlike the policy case there is **no** equivalent route reachable through a
+  permission the role does hold, so an embedded client has to pin the public keys at build time
+  (`SigningKeySet::from_public_keys`) or proxy the call. Do not word `Client::signing_key_set` as
+  if an embedded client could call it.
 
 ## Critical Dependency Notes
 

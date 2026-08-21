@@ -85,6 +85,13 @@ pub enum TamgaError {
     ///
     /// `retry_after` is the server's `Retry-After` in seconds when it sent
     /// one. Wait at least that long before trying again.
+    ///
+    /// `response_info` carries the diagnostic response headers, including the
+    /// `x-ratelimit-*` budget the middleware attaches to the throttled
+    /// response itself
+    /// ([`crate::transport::RateLimitInfo`]). Boxed for the same reason the
+    /// [`TamgaError::Api`] payload is: an inline [`crate::transport::ResponseInfo`]
+    /// is wide enough to bloat every `Result<T, TamgaError>` slot in the crate.
     #[error("rate limited by the server{}", match retry_after {
         Some(s) => format!("; retry after {s}s"),
         None => String::new(),
@@ -92,6 +99,10 @@ pub enum TamgaError {
     RateLimited {
         /// Server-supplied `Retry-After`, in seconds.
         retry_after: Option<u64>,
+        /// Diagnostic response headers off the `429`, `x-ratelimit-*`
+        /// included. All-`None` when the response carried none — which means
+        /// no information, not an unlimited budget.
+        response_info: Box<crate::transport::ResponseInfo>,
     },
     /// `422 CHECK_IN_NOT_REQUIRED` — a **caller error**, not something to
     /// retry. Callers should check `require_check_in` on the license's
@@ -389,6 +400,30 @@ pub enum CheckoutError {
     /// (`422 TTL_INVALID`), checked before the round trip.
     #[error("ttl out of range: {0}")]
     TtlOutOfRange(String),
+    /// The file's `kid` claim names a signing key the supplied
+    /// [`crate::checkout::key_set::SigningKeySet`] does not hold.
+    ///
+    /// **This is not a forgery.** It is the outcome a genuine file signed
+    /// before a key rotation produces against a key set that has not caught up
+    /// — a stale set, an application shipped with one pinned key, or an
+    /// account whose public key was never published. A tampered file whose
+    /// `kid` *is* known fails as
+    /// [`CheckoutError::Crypto`]`(`[`CryptoError::VerificationFailed`]`)`
+    /// instead, and separating the two is the entire point of verifying
+    /// through a key set: the first calls for refreshing the keys, the second
+    /// for refusing the file.
+    ///
+    /// Nothing about the file has been trusted at this point. The `kid` is
+    /// read from bytes whose signature has not been checked and is used only
+    /// to select from keys the caller already trusts — it can never introduce
+    /// one.
+    #[error("no signing key for kid {kid} in the supplied key set")]
+    UnknownSigningKey {
+        /// The `kid` the file claims, verbatim. Log it next to
+        /// [`crate::checkout::key_set::SigningKeySet::kids`] to see what the
+        /// set did hold.
+        kid: String,
+    },
     /// Signature verification or decryption itself failed — see
     /// [`CryptoError`].
     #[error(transparent)]
@@ -685,6 +720,7 @@ mod tests {
     fn classifiers_return_none_for_errors_without_a_server_body() {
         let err = TamgaError::RateLimited {
             retry_after: Some(5),
+            response_info: Box::default(),
         };
         assert!(err.json_api_error().is_none());
         assert_eq!(err.code(), None);

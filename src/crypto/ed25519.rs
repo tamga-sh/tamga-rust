@@ -37,6 +37,33 @@ pub fn verify(
         .map_err(|_| crate::error::CryptoError::VerificationFailed)
 }
 
+/// The `kid` a signed offline file names, computed from an Ed25519 public key.
+///
+/// The server's rule (`tamga-api/src/shared/crypto/license_file.rs:70-77`) is
+/// the first eight bytes of `SHA-256(public key)`, lowercase hex — so a
+/// sixteen-character string. Because it is a pure function of the key, a client
+/// holding any public key can compute the id the file would name, which is what
+/// makes key rotation solvable offline: fetch or embed the key set, compute
+/// each id, and pick the one the file's `kid` claim names. See
+/// [`crate::checkout::key_set::SigningKeySet`].
+///
+/// ⚠️ **The hash is over the base64 STRING, not the 32 decoded key bytes.**
+/// The server stores and publishes the Ed25519 public half as standard base64
+/// (`key_material.rs` — "Raw 32-byte Ed25519 public key, base64-encoded") and
+/// hands that same `&str` to its `key_id`. Hashing the decoded bytes gives a
+/// different, wrong id — the same class of gotcha as the signature covering
+/// `enc`'s base64 string rather than its decoded bytes.
+///
+/// Passing the empty string is not an error and is worth knowing about: an
+/// account whose `ed25519_public_key` column was never backfilled makes the
+/// server emit `key_id("")` — the constant `e3b0c44298fc1c14` — as the `kid` of
+/// every file it signs.
+pub fn key_id(ed25519_public_key_base64: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(ed25519_public_key_base64.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Loads a raw 32-byte Ed25519 public key from a base64-encoded string
 /// (account config format).
 pub fn public_key_from_base64(b64: &str) -> Result<[u8; 32], crate::error::CryptoError> {
@@ -106,5 +133,43 @@ mod tests {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"too short");
         assert!(public_key_from_base64(&b64).is_err());
+    }
+
+    #[test]
+    fn key_id_matches_the_servers_own_vectors() {
+        // 16 lowercase hex characters = the first 8 bytes of SHA-256.
+        let all_zero_key_b64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let kid = key_id(all_zero_key_b64);
+        assert_eq!(kid, "51643eac9777b63a");
+        assert_eq!(kid.len(), 16);
+        assert!(kid
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    #[test]
+    fn key_id_of_the_empty_string_is_the_unbackfilled_account_sentinel() {
+        // `check_out_license.rs:92` passes `.unwrap_or_default()`, so an
+        // account whose public-key column was never populated signs every file
+        // with this one `kid`. Recognising it is the difference between "your
+        // key set is stale" and "this server has no published key at all".
+        assert_eq!(key_id(""), "e3b0c44298fc1c14");
+    }
+
+    #[test]
+    fn key_id_hashes_the_base64_string_not_the_decoded_bytes() {
+        // The gotcha this function exists to pin: the server hands its
+        // `key_id` the stored base64 `&str`, never the 32 decoded bytes.
+        use base64::Engine as _;
+        let (pubkey, _) = gen_keypair();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(pubkey);
+
+        use sha2::Digest as _;
+        let over_decoded_bytes: String = sha2::Sha256::digest(pubkey)[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        assert_ne!(key_id(&b64), over_decoded_bytes);
     }
 }

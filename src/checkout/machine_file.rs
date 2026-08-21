@@ -339,17 +339,7 @@ pub fn verify_machine_file_at(
     use base64::Engine as _;
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-    let body = pem
-        .trim()
-        .strip_prefix(PEM_HEADER)
-        .and_then(|rest| rest.strip_suffix(PEM_FOOTER))
-        .ok_or(crate::error::CheckoutError::MalformedPem)?
-        .trim();
-
-    let cert_json = B64
-        .decode(body)
-        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
-    let cert: CertPayload = serde_json::from_slice(&cert_json)?;
+    let cert = parse_envelope(pem)?;
 
     let (encoding, signing_suffix) = parse_alg(&cert.alg)?;
     // Cross-check only: the file agreeing with the caller rules out a mixed-up
@@ -394,6 +384,123 @@ pub fn verify_machine_file_at(
         }
     }
 
+    let plaintext = decode_plaintext(&cert, encoding, license_key, fingerprint)?;
+    finish(&plaintext, now_unix)
+}
+
+/// As [`verify_machine_file`], selecting the public key by the file's own
+/// `kid` claim from a set of keys the caller trusts.
+///
+/// Same rotation problem, same two distinct outcomes as
+/// [`crate::checkout::license_file::verify_license_file_with_key_set`]: an
+/// unknown `kid` is [`crate::error::CheckoutError::UnknownSigningKey`] (a
+/// stale key set), a known `kid` with a failing signature stays
+/// [`crate::error::CryptoError::VerificationFailed`] (a forgery).
+///
+/// **Ed25519-signed machine files only, and that is a server-side limit rather
+/// than a shortcut here.** There is no `scheme` parameter because a key set
+/// cannot serve the other three:
+///
+/// - the only keys the account publishes are Ed25519 — rotation is
+///   `rotate_ed25519` and writes a literal `'ed25519'`, and the account's RSA
+///   and ECDSA signing keys are neither published nor rotated at all;
+/// - and both checkout handlers compute the `kid` claim from
+///   `account.ed25519_public_key` **whatever scheme actually signed the bytes**
+///   (`check_out_machine.rs:125`), so on an RSA- or ECDSA-signed file the claim
+///   names a key that did not sign it. Matching on it would be worse than
+///   useless.
+///
+/// A file whose `alg` names any other signing suffix is refused as
+/// [`crate::error::CheckoutError::UnsupportedAlgorithm`]. Verify those with
+/// [`verify_machine_file`] and the licence's own `scheme`, and accept that a
+/// rotation is not a distinguishable outcome for them.
+pub fn verify_machine_file_with_key_set(
+    pem: &str,
+    keys: &crate::checkout::key_set::SigningKeySet,
+    license_key: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
+    verify_machine_file_with_key_set_at(
+        pem,
+        keys,
+        license_key,
+        fingerprint,
+        crate::checkout::license_file::unix_now(),
+    )
+}
+
+/// As [`verify_machine_file_with_key_set`], with the current time supplied by
+/// the caller — see [`verify_machine_file_at`] for why that matters.
+pub fn verify_machine_file_with_key_set_at(
+    pem: &str,
+    keys: &crate::checkout::key_set::SigningKeySet,
+    license_key: Option<&str>,
+    fingerprint: Option<&str>,
+    now_unix: i64,
+) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
+    use crate::models::policy::LicenseScheme;
+
+    let cert = parse_envelope(pem)?;
+    let (encoding, signing_suffix) = parse_alg(&cert.alg)?;
+
+    // Not a cross-check against a caller-supplied scheme, as in
+    // `verify_machine_file_at`, but a hard restriction: the key set holds
+    // Ed25519 keys and nothing else can be resolved from a `kid`.
+    let expected_suffix = scheme_alg_suffix(LicenseScheme::Ed25519Sign);
+    if signing_suffix != expected_suffix {
+        return Err(crate::error::CheckoutError::UnsupportedAlgorithm(format!(
+            "file declares alg suffix {signing_suffix:?}; a signing key set can only verify {expected_suffix:?} machine files"
+        )));
+    }
+
+    // The `kid` lives inside `enc`, so `enc` is decoded — and, when encrypted,
+    // decrypted under the licence key and fingerprint — before the signature
+    // is checked. Nothing from those bytes is trusted: the `kid` can only
+    // select from keys the caller already supplied, never introduce one.
+    let plaintext = decode_plaintext(&cert, encoding, license_key, fingerprint)?;
+    let kid = crate::checkout::license_file::probe_kid(&plaintext)?;
+    let pubkey = keys
+        .find(&kid)
+        .ok_or(crate::error::CheckoutError::UnknownSigningKey { kid })?;
+
+    use base64::Engine as _;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&cert.sig)
+        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
+    crate::crypto::ed25519::verify(pubkey, cert.enc.as_bytes(), &sig_bytes)?;
+
+    finish(&plaintext, now_unix)
+}
+
+/// Strips the PEM markers and parses the inner `{ enc, sig, alg }` JSON.
+fn parse_envelope(pem: &str) -> Result<CertPayload, crate::error::CheckoutError> {
+    use base64::Engine as _;
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    let body = pem
+        .trim()
+        .strip_prefix(PEM_HEADER)
+        .and_then(|rest| rest.strip_suffix(PEM_FOOTER))
+        .ok_or(crate::error::CheckoutError::MalformedPem)?
+        .trim();
+
+    let cert_json = B64
+        .decode(body)
+        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
+    let cert: CertPayload = serde_json::from_slice(&cert_json)?;
+    Ok(cert)
+}
+
+/// Decodes `enc`, decrypting it first when `encoding` says it is encrypted.
+fn decode_plaintext(
+    cert: &CertPayload,
+    encoding: EncEncoding,
+    license_key: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Result<Vec<u8>, crate::error::CheckoutError> {
+    use base64::Engine as _;
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
     let plaintext = match encoding {
         EncEncoding::Plain => B64
             .decode(&cert.enc)
@@ -431,8 +538,15 @@ pub fn verify_machine_file_at(
             crate::crypto::aes_gcm::decrypt(&key, &nonce, &ciphertext_and_tag)?
         }
     };
+    Ok(plaintext)
+}
 
-    let payload: DataPayload = serde_json::from_slice(&plaintext)?;
+/// Parses the verified payload and enforces its signed `exp` claim.
+fn finish(
+    plaintext: &[u8],
+    now_unix: i64,
+) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
+    let payload: DataPayload = serde_json::from_slice(plaintext)?;
 
     // The signature proves the file is authentic. It does not prove it is
     // still valid — that is this check. `exp` is absent for a checkout made
@@ -601,6 +715,195 @@ mod tests {
         fingerprint: Option<&str>,
     ) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
         verify_machine_file_at(pem, scheme, pubkey, license_key, fingerprint, ISSUED_AT)
+    }
+
+    /// Builds an Ed25519-signed `.mach` file under a caller-chosen key, and
+    /// with a `kid` claim the caller chooses independently of it — the two
+    /// have to be separable to tell "unknown key" from "bad signature" apart.
+    fn build_ed25519_pem_with_kid(
+        signing_key: &ed25519_dalek::SigningKey,
+        kid: &str,
+        encrypt_key: Option<[u8; 32]>,
+    ) -> String {
+        use ed25519_dalek::Signer as _;
+
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&representative_payload_json(None)).unwrap();
+        payload["meta"]["kid"] = serde_json::json!(kid);
+        let payload = payload.to_string();
+
+        let (enc_prefix, enc) = match encrypt_key {
+            None => ("base64", B64.encode(payload.as_bytes())),
+            Some(key) => {
+                use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+                use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+                let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
+                let mut nonce_bytes = [0u8; NONCE_LEN];
+                AeadOsRng.fill_bytes(&mut nonce_bytes);
+                let nonce = Nonce::from(nonce_bytes);
+                let ciphertext_and_tag = cipher.encrypt(&nonce, payload.as_bytes()).unwrap();
+                (
+                    "aes-256-gcm",
+                    format!(
+                        "{}.{}",
+                        B64.encode(nonce_bytes),
+                        B64.encode(&ciphertext_and_tag)
+                    ),
+                )
+            }
+        };
+
+        let sig = B64.encode(signing_key.sign(enc.as_bytes()).to_bytes());
+        let alg = format!("{enc_prefix}+ed25519+{ALG_VERSION_MARKER}");
+        let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": alg });
+        let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        format!("{PEM_HEADER}\n{pem_body}\n{PEM_FOOTER}")
+    }
+
+    fn gen_ed25519() -> (ed25519_dalek::SigningKey, String) {
+        use rand::rngs::OsRng;
+        use rand::RngCore;
+        let mut secret = [0u8; 32];
+        OsRng.fill_bytes(&mut secret);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let b64 = B64.encode(signing_key.verifying_key().to_bytes());
+        (signing_key, b64)
+    }
+
+    // ── Key rotation: verifying through a key set ────────────────────────
+
+    #[test]
+    fn a_machine_file_signed_before_a_rotation_verifies_against_the_retired_key() {
+        let (old_signing, old_b64) = gen_ed25519();
+        let (_new_signing, new_b64) = gen_ed25519();
+        let kid = crate::crypto::ed25519::key_id(&old_b64);
+        let pem = build_ed25519_pem_with_kid(&old_signing, &kid, None);
+
+        let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&new_b64, &old_b64])
+            .unwrap();
+        let verified =
+            verify_machine_file_with_key_set_at(&pem, &keys, None, None, ISSUED_AT).unwrap();
+        assert_eq!(verified.claims.kid, kid);
+        assert_eq!(verified.machine.attributes.fingerprint, "fp-abc123");
+    }
+
+    #[test]
+    fn an_unknown_kid_on_a_machine_file_is_distinct_from_a_bad_signature() {
+        let (signing, _b64) = gen_ed25519();
+        let (_other_signing, other_b64) = gen_ed25519();
+        let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&other_b64]).unwrap();
+
+        // Names a kid nothing in the set holds.
+        let unknown = build_ed25519_pem_with_kid(&signing, "0f0f0f0f0f0f0f0f", None);
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(&unknown, &keys, None, None, ISSUED_AT).unwrap_err(),
+            crate::error::CheckoutError::UnknownSigningKey { ref kid } if kid == "0f0f0f0f0f0f0f0f"
+        ));
+
+        // Names a kid the set *does* hold — but a different key signed it.
+        let forged =
+            build_ed25519_pem_with_kid(&signing, &crate::crypto::ed25519::key_id(&other_b64), None);
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(&forged, &keys, None, None, ISSUED_AT).unwrap_err(),
+            crate::error::CheckoutError::Crypto(crate::error::CryptoError::VerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn the_key_set_path_handles_the_dot_separated_encrypted_enc() {
+        // The kid is inside the ciphertext, so both halves of the machine
+        // file's own encrypted layout have to be decoded before a key can be
+        // picked — and both the licence key and the fingerprint are needed.
+        let (signing, b64) = gen_ed25519();
+        let kid = crate::crypto::ed25519::key_id(&b64);
+        let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
+
+        let license_key = "lic-abc123";
+        let fingerprint = "fp-abc123";
+        let enc_key = crate::crypto::hkdf::derive_machine_file_key(license_key, fingerprint);
+        let pem = build_ed25519_pem_with_kid(&signing, &kid, Some(*enc_key));
+
+        let verified = verify_machine_file_with_key_set_at(
+            &pem,
+            &keys,
+            Some(license_key),
+            Some(fingerprint),
+            ISSUED_AT,
+        )
+        .unwrap();
+        assert_eq!(verified.claims.kid, kid);
+
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(&pem, &keys, None, Some(fingerprint), ISSUED_AT)
+                .unwrap_err(),
+            crate::error::CheckoutError::LicenseKeyMissing
+        ));
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(&pem, &keys, Some(license_key), None, ISSUED_AT)
+                .unwrap_err(),
+            crate::error::CheckoutError::FingerprintMissing
+        ));
+    }
+
+    #[test]
+    fn a_non_ed25519_machine_file_is_refused_by_the_key_set_path() {
+        // Not a shortcut: the account publishes Ed25519 keys only, never
+        // rotates the RSA/ECDSA ones, and stamps the *Ed25519* key's id into
+        // the `kid` claim of an ECDSA-signed file regardless. Matching on that
+        // claim would be worse than useless, so the path refuses outright.
+        for scheme in [
+            LicenseScheme::EcdsaP256Sign,
+            LicenseScheme::Rsa2048Pkcs1Sign,
+            LicenseScheme::Rsa2048Pkcs1PssSign,
+        ] {
+            let (_pubkey, pem) = build_pem(scheme, None);
+            let keys = crate::checkout::key_set::SigningKeySet::default();
+            let err = verify_machine_file_with_key_set_at(&pem, &keys, None, None, ISSUED_AT)
+                .unwrap_err();
+            assert!(
+                matches!(err, crate::error::CheckoutError::UnsupportedAlgorithm(ref a) if a.contains("key set")),
+                "{scheme:?} produced {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wall_clock_key_set_entry_point_verifies_a_file_that_never_expires() {
+        // The `_at` variants carry the interesting cases; this pins that the
+        // convenience wrapper reads the clock and reaches the same verdict for
+        // a file with no `exp` claim, which is timeless by construction.
+        let (signing, b64) = gen_ed25519();
+        let kid = crate::crypto::ed25519::key_id(&b64);
+        let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
+        let pem = build_ed25519_pem_with_kid(&signing, &kid, None);
+
+        let verified = verify_machine_file_with_key_set(&pem, &keys, None, None).unwrap();
+        assert_eq!(verified.claims.kid, kid);
+        assert!(verified.claims.exp.is_none());
+    }
+
+    #[test]
+    fn the_key_set_path_still_enforces_the_signed_exp_claim() {
+        use ed25519_dalek::Signer as _;
+        let (signing, b64) = gen_ed25519();
+        let kid = crate::crypto::ed25519::key_id(&b64);
+        let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
+
+        let exp = ISSUED_AT + 3600;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&representative_payload_json(Some(exp))).unwrap();
+        payload["meta"]["kid"] = serde_json::json!(kid);
+        let enc = B64.encode(payload.to_string().as_bytes());
+        let sig = B64.encode(signing.sign(enc.as_bytes()).to_bytes());
+        let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": "base64+ed25519+v2" });
+        let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        let pem = format!("{PEM_HEADER}\n{pem_body}\n{PEM_FOOTER}");
+
+        assert!(verify_machine_file_with_key_set_at(&pem, &keys, None, None, exp - 1).is_ok());
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(&pem, &keys, None, None, exp + 3600).unwrap_err(),
+            crate::error::CheckoutError::Expired { exp: e } if e == exp
+        ));
     }
 
     // ── alg parsing ──────────────────────────────────────────────────────

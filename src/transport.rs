@@ -34,11 +34,19 @@
 //! **except** `GET .../actions/validate` (quick-validate), which returns
 //! plain `application/json` with a flat body and no `data` envelope.
 //!
-//! Deliberately **not** implemented: `X-RateLimit-*` response header parsing
-//! (declared in the CORS allowlist only, never set by any handler today) and
-//! the `Tamga-Environment` request header (no server-side read path yet).
-//! Rate limiting is handled off the `429` status and `Retry-After` instead —
-//! see [`crate::TamgaError::RateLimited`].
+//! `x-ratelimit-*` **is** set by the server, and this module claimed otherwise
+//! until 0.3.0. The rate-limit middleware attaches all four of
+//! `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` and
+//! `x-ratelimit-window` to the response it is about to return
+//! (`tamga-api/src/shared/rate_limit/middleware.rs:140-143`), and the same four
+//! names are in the CORS expose list (`router.rs:123-126`) so a browser client
+//! can read them too. The old note confused "in the expose list" with "only in
+//! the expose list". They are parsed into [`RateLimitInfo`] and reachable on
+//! [`ResponseInfo::rate_limit`], and on the `response_info` field of
+//! [`crate::TamgaError::RateLimited`].
+//!
+//! Still deliberately **not** implemented: the `Tamga-Environment` request
+//! header (no server-side read path yet).
 
 /// Auth transport variants matching the server's try-order — see the module
 /// doc comment for which header or query parameter each one produces.
@@ -138,9 +146,110 @@ pub fn sanitize_version(version: &str) -> String {
 /// override it — matches the server's own default.
 pub const DEFAULT_API_VERSION: &str = "1.8";
 
+/// The four `x-ratelimit-*` response headers.
+///
+/// The server's rate-limit middleware sets all four together on the response
+/// it is about to return — `x-ratelimit-limit`, `x-ratelimit-remaining`,
+/// `x-ratelimit-reset` and `x-ratelimit-window`
+/// (`tamga-api/src/shared/rate_limit/middleware.rs:140-143`), on the throttled
+/// `429` and on the request it let through alike.
+///
+/// Every field is nevertheless [`Option`], because "on every response" has two
+/// documented exceptions and one undocumented one:
+///
+/// - the middleware returns early, before the header block, when the
+///   deployment has no rate limiter configured at all (`middleware.rs:94`);
+/// - and for an `OPTIONS` preflight, which the CORS layer answers
+///   (`middleware.rs:99-101`);
+/// - and the middleware is installed with `route_layer`, not `layer`
+///   (`router.rs:62-66`), so a request that matches no route 404s without
+///   ever running it;
+/// - and any proxy in front of the API may strip or rewrite them.
+///
+/// Absent headers are therefore not an error and not a sign of an unlimited
+/// budget — they mean *no information*, and a caller must not read `None` as
+/// "plenty of room left". Use [`RateLimitInfo::is_present`] to tell the two
+/// apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RateLimitInfo {
+    /// `x-ratelimit-limit` — the bucket's capacity, i.e. how many requests
+    /// the current window admits. The server computes it as
+    /// `max(per_second, burst)`, so it is the burst allowance rather than
+    /// the refill rate whenever the two differ.
+    pub limit: Option<u64>,
+    /// `x-ratelimit-remaining` — requests left in the current window.
+    /// `0` on the response that was itself throttled.
+    pub remaining: Option<u64>,
+    /// `x-ratelimit-reset` — **an absolute Unix timestamp in seconds**, not a
+    /// delta. Subtract the current time to get a wait; do not sleep for this
+    /// value. (`Retry-After`, by contrast, *is* delta-seconds — the server
+    /// derives it as `reset - now` at `middleware.rs:147`.) Use
+    /// [`RateLimitInfo::seconds_until_reset`] rather than doing the
+    /// subtraction by hand.
+    pub reset: Option<u64>,
+    /// `x-ratelimit-window` — the window length in seconds. A constant `1`
+    /// server-side today (`WINDOW_SECS`), which is what makes the configured
+    /// `*_burst` behave as a burst allowance rather than a rate.
+    pub window: Option<u64>,
+}
+
+impl RateLimitInfo {
+    /// Extracts the four `x-ratelimit-*` headers from a header map.
+    ///
+    /// A header that is missing, non-UTF-8, or not a base-10 integer is left
+    /// as `None` — this is advisory budget metadata, and a proxy that
+    /// rewrites one header must not turn an otherwise good response into an
+    /// error.
+    pub fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        let num = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .and_then(|v| v.parse::<u64>().ok())
+        };
+        RateLimitInfo {
+            limit: num("x-ratelimit-limit"),
+            remaining: num("x-ratelimit-remaining"),
+            reset: num("x-ratelimit-reset"),
+            window: num("x-ratelimit-window"),
+        }
+    }
+
+    /// `true` when at least one of the four headers was present and parsable.
+    ///
+    /// The distinction that matters: an all-`None` value means the response
+    /// carried no budget information, **not** that the budget is unlimited.
+    pub fn is_present(&self) -> bool {
+        self.limit.is_some()
+            || self.remaining.is_some()
+            || self.reset.is_some()
+            || self.window.is_some()
+    }
+
+    /// Seconds from `now_unix` until the bucket refills, saturating at `0`.
+    ///
+    /// `None` when the server sent no `x-ratelimit-reset`. A reset already in
+    /// the past yields `0` rather than wrapping — the header is an absolute
+    /// timestamp and the local clock is not guaranteed to agree with the
+    /// server's.
+    pub fn seconds_until_reset(&self, now_unix: u64) -> Option<u64> {
+        self.reset.map(|reset| reset.saturating_sub(now_unix))
+    }
+}
+
 /// Response headers a caller may want to read off any [`crate::TamgaError`]
 /// or successful response for support/debugging purposes.
+///
+/// `#[non_exhaustive]` since 0.3.0: adding [`ResponseInfo::rate_limit`] was
+/// itself a breaking change precisely because a struct with all-public fields
+/// and no such marker can be built by a consumer with a struct literal, so
+/// every later header the server grows would need another minor. Construct one
+/// from [`ResponseInfo::default`] and assign fields, or read it back with
+/// [`ResponseInfo::from_headers`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResponseInfo {
     /// Echoed `Tamga-Version` the server processed the request with.
     pub tamga_version: Option<String>,
@@ -151,6 +260,9 @@ pub struct ResponseInfo {
     /// Useful to log for support — correlates a client-side error with
     /// server-side logs.
     pub request_id: Option<String>,
+    /// The `x-ratelimit-*` budget headers — see [`RateLimitInfo`], and note
+    /// that all-`None` means "no information", not "no limit".
+    pub rate_limit: RateLimitInfo,
 }
 
 impl ResponseInfo {
@@ -170,6 +282,7 @@ impl ResponseInfo {
             tamga_edition: get("Tamga-Edition"),
             tamga_mode: get("Tamga-Mode"),
             request_id: get("X-Request-Id"),
+            rate_limit: RateLimitInfo::from_headers(headers),
         }
     }
 }
@@ -280,6 +393,75 @@ mod tests {
         let headers = reqwest::header::HeaderMap::new();
         let info = ResponseInfo::from_headers(&headers);
         assert_eq!(info, ResponseInfo::default());
+    }
+
+    // ── x-ratelimit-* ────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_headers_are_read_back_off_a_response() {
+        // The middleware sets all four together, on the throttled response
+        // and on the ones it lets through alike. This document claimed for a
+        // long time that no handler set them at all; it was wrong.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-limit", "20".parse().unwrap());
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "1767225600".parse().unwrap());
+        headers.insert("x-ratelimit-window", "1".parse().unwrap());
+
+        let info = ResponseInfo::from_headers(&headers);
+        assert_eq!(info.rate_limit.limit, Some(20));
+        assert_eq!(info.rate_limit.remaining, Some(0));
+        assert_eq!(info.rate_limit.reset, Some(1_767_225_600));
+        assert_eq!(info.rate_limit.window, Some(1));
+        assert!(info.rate_limit.is_present());
+    }
+
+    #[test]
+    fn absent_rate_limit_headers_mean_no_information_not_no_limit() {
+        // Two live server paths skip the header block entirely (no limiter
+        // configured, and OPTIONS preflight), and a proxy can strip them. A
+        // caller must be able to tell that apart from a large budget.
+        let headers = reqwest::header::HeaderMap::new();
+        let info = ResponseInfo::from_headers(&headers);
+        assert_eq!(info.rate_limit, RateLimitInfo::default());
+        assert!(!info.rate_limit.is_present());
+        assert_eq!(info.rate_limit.remaining, None);
+    }
+
+    #[test]
+    fn a_garbled_rate_limit_header_is_dropped_not_fatal() {
+        // Advisory metadata: a proxy that rewrites one header must not turn
+        // an otherwise good response into an error, and must not corrupt the
+        // three that are still intact.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-limit", "not-a-number".parse().unwrap());
+        headers.insert("x-ratelimit-remaining", "-1".parse().unwrap());
+        headers.insert("x-ratelimit-reset", " 1767225600 ".parse().unwrap());
+
+        let rl = RateLimitInfo::from_headers(&headers);
+        assert_eq!(rl.limit, None);
+        assert_eq!(rl.remaining, None, "a negative count is not a u64");
+        assert_eq!(
+            rl.reset,
+            Some(1_767_225_600),
+            "surrounding space is trimmed"
+        );
+        assert!(rl.is_present());
+    }
+
+    #[test]
+    fn reset_is_an_absolute_timestamp_not_a_delay() {
+        // The trap this helper exists to close: sleeping for `reset` rather
+        // than for `reset - now` parks the caller until the year 2026.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset", "1767225600".parse().unwrap());
+        let rl = RateLimitInfo::from_headers(&headers);
+
+        assert_eq!(rl.seconds_until_reset(1_767_225_598), Some(2));
+        // A reset already behind us saturates rather than wrapping: the local
+        // clock is not guaranteed to agree with the server's.
+        assert_eq!(rl.seconds_until_reset(1_767_225_999), Some(0));
+        assert_eq!(RateLimitInfo::default().seconds_until_reset(0), None);
     }
 }
 

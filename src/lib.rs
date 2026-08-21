@@ -30,12 +30,31 @@
 //! [`checkout::machine_file::verify_machine_file_at`] rather than trusting a
 //! local clock the user can wind back.
 //!
+//! ## Signing-key rotation
+//!
+//! Verifying against one embedded public key cannot distinguish a file signed
+//! before the account rotated its key from a forged one — both fail
+//! identically. Verify through a [`checkout::key_set::SigningKeySet`] instead
+//! and the two become distinct outcomes:
+//! [`error::CheckoutError::UnknownSigningKey`] (refresh the keys) versus
+//! [`error::CryptoError::VerificationFailed`] (refuse the file). Build the set
+//! from the account's published key history with [`Client::signing_key_set`],
+//! or with no network at all from keys pinned in the binary via
+//! [`checkout::key_set::SigningKeySet::from_public_keys`] — the `kid` a file
+//! names is computable locally with [`crypto::ed25519::key_id`].
+//!
+//! Two limits: a raw licence key gets `403` from `GET /signing-keys` (the
+//! route needs `account.read`, which `Role::LicenseToken` does not hold), and
+//! only Ed25519-signed files are covered.
+//!
 //! ## Rate limiting
 //!
 //! The server does return `429 Too Many Requests`. It surfaces as
-//! [`error::TamgaError::RateLimited`] carrying the parsed `Retry-After`, and
-//! safe requests are retried automatically first — see
-//! [`client::ClientConfigBuilder::max_retries`].
+//! [`error::TamgaError::RateLimited`] carrying the parsed `Retry-After` and
+//! the response's `x-ratelimit-*` budget headers
+//! ([`transport::RateLimitInfo`]); safe requests are retried automatically
+//! first — see [`client::ClientConfigBuilder::max_retries`]. Note
+//! `x-ratelimit-reset` is an absolute Unix timestamp, not a delay.
 //!
 //! ## Auth
 //!
@@ -81,6 +100,10 @@
 //!   [`models::policy::CheckInInterval`].
 //! - The machine collection is the one **offset**-paginated route this crate
 //!   calls; every other listing is keyset. See [`models::page`].
+//! - Both checkout handlers compute a file's `kid` claim from the account's
+//!   **Ed25519** public key whatever scheme actually signed the bytes, and
+//!   rotation only ever mints Ed25519 keys, so `kid` is meaningful for
+//!   Ed25519-signed files only. See [`checkout::key_set`].
 //!
 //! ## Heartbeat scheduling
 //!
