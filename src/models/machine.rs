@@ -10,13 +10,16 @@
 //!   feed the licence's `machines_memory_count`/`machines_disk_count`
 //!   totals and the `MEMORY_LIMIT_EXCEEDED`/`DISK_LIMIT_EXCEEDED` checks.
 //! - `HeartbeatStatus`: `NOT_STARTED` → `ALIVE` → `DEAD` → `RESURRECTED`.
-//!   Window is a **hardcoded 600s (10 min)**, not driven by
-//!   `policy.heartbeat_duration`. `DEAD` means **only** "the last ping is
-//!   older than that window" — it is not a tombstone. Under the default
-//!   policy (`require_heartbeat = false`) nothing is ever culled, so a
-//!   machine can report `DEAD` indefinitely with its row and its seat still
-//!   in place. Keep pinging through `DEAD`; the ping succeeds and revives
-//!   the machine. A `404` from the ping is the only row-is-gone signal.
+//!   The server's window **is** `policy.heartbeat_duration`, falling back to
+//!   600s (10 min) only when that column is null — but this crate cannot read
+//!   it and assumes the 600s fallback throughout, so on a shorter-window
+//!   policy the caller must pick the ping interval itself. `DEAD` means
+//!   **only** "the last ping is older than that window" — it is not a
+//!   tombstone. Under the default policy (`require_heartbeat = false`)
+//!   nothing is ever culled, so a machine can report `DEAD` indefinitely
+//!   with its row and its seat still in place. Keep pinging through `DEAD`;
+//!   the ping succeeds and revives the machine. A `404` from the ping is the
+//!   only row-is-gone signal.
 //! - `ComponentResource`: `machine_id`, `fingerprint`, `name`, `metadata`.
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
@@ -70,6 +73,12 @@ pub struct MachineAttributes {
     /// Timestamp of the last `ping-heartbeat` call.
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Server-computed next-expected-heartbeat deadline, if derivable.
+    ///
+    /// ⚠️ Not a reliable source for the policy's real heartbeat window. The
+    /// server computes it from the window carried on the row, and the create,
+    /// ping-heartbeat and reset-heartbeat queries — the only machine
+    /// responses this crate can reach — do not join the policy, so this is
+    /// `last_heartbeat_at + 600s` even under a policy that asks for less.
     pub next_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Timestamp of the last machine-file checkout.
     pub last_check_out_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -82,8 +91,26 @@ pub struct MachineAttributes {
 }
 
 /// Machine heartbeat state machine: `NotStarted` → `Alive` → `Dead` →
-/// `Resurrected`. The window is a **hardcoded 600s (10 min)**, not driven
-/// by `policy.heartbeat_duration`.
+/// `Resurrected`.
+///
+/// ⚠️ **The window is policy-driven, and this crate cannot discover it.**
+/// Server-side it is `policy.heartbeat_duration`, with 600s (10 min) used
+/// only as the fallback when that column is null: `effective_window_secs`
+/// prefers the policy value, and the cull job's claim query selects on
+/// `COALESCE(p.heartbeat_duration, 600)`. Nothing in this crate reads it —
+/// there is no `get_policy` and no `get_machine` — so every interval this
+/// crate's documentation suggests is computed against the 600s fallback.
+///
+/// Do not try to recover the real window from `next_heartbeat_at` either.
+/// The server derives that field from the window carried on the row, and the
+/// policy join is present only on the read queries this crate exposes no
+/// route for; the create, ping-heartbeat and reset-heartbeat paths all omit
+/// it, so on every machine response reachable from here `next_heartbeat_at`
+/// is `last_heartbeat_at + 600s` whatever the policy actually says. **On a
+/// policy with a shorter window, a caller pinging on the 600s assumption
+/// pings far too slowly and its machines go `Dead` on schedule.** Learn the
+/// window out of band — from whoever provisions the policy — and set the
+/// interval explicitly.
 ///
 /// ⚠️ **`Dead` is a staleness report, not a tombstone.** The server computes
 /// it purely from `last_heartbeat_at` versus the window and never consults
@@ -103,7 +130,8 @@ pub struct MachineAttributes {
 pub enum HeartbeatStatus {
     /// Never pinged.
     NotStarted,
-    /// Pinged within the 600s window.
+    /// Pinged within the effective window — `policy.heartbeat_duration`,
+    /// else the 600s fallback. See the type-level doc.
     Alive,
     /// Window elapsed since the last ping — and nothing more. Says nothing
     /// about whether the row still exists; see the type-level doc.
@@ -250,10 +278,10 @@ pub struct ProcessAttributes {
 ///
 /// ⚠️ **The server does not currently reap process rows.** A 30-second
 /// window and a delete-on-expiry sweep are both written — much shorter than
-/// a machine's 600s, with no resurrection grace period and no `KEEP_DEAD`
-/// equivalent — but the worker holding them has no call site and the job
-/// scheduler wires no process tick, so as shipped nothing runs it: no
-/// process is ever marked dead, no `process.heartbeat.dead` event is ever
+/// a machine's 600s fallback, with no resurrection grace period and no
+/// `KEEP_DEAD` equivalent — but the worker holding them has no call site and
+/// the job scheduler wires no process tick, so as shipped nothing runs it:
+/// no process is ever marked dead, no `process.heartbeat.dead` event is ever
 /// emitted, and no row is ever removed. `last_heartbeat_at` is written and
 /// echoed back, never acted on.
 ///

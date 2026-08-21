@@ -925,6 +925,14 @@ impl Client {
     /// The row-is-gone signal is a `404`
     /// ([`crate::TamgaError::NotFound`]) from this call — that, and only
     /// that, is the cue to re-activate with [`Self::activate_machine`].
+    ///
+    /// ⚠️ Pick the interval deliberately. The server's window is
+    /// `policy.heartbeat_duration` and falls back to 600s only when unset,
+    /// but this crate cannot read a policy and the `next_heartbeat_at` on the
+    /// response is computed against that 600s fallback regardless — see
+    /// [`crate::models::machine::HeartbeatStatus`]. A tighter policy needs a
+    /// tighter interval, and only out-of-band knowledge of the policy will
+    /// tell you so.
     pub async fn ping_heartbeat(
         &self,
         machine_id: uuid::Uuid,

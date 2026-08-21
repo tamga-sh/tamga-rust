@@ -165,6 +165,19 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   server-side and decrements the counter, but this crate exposes no method for it, so a Rust caller
   currently cannot release the slot at all. Same defect class as the `DEAD` bullet above: a claim
   that is true of code that never runs.
+- **The heartbeat window is policy-driven, and this crate cannot read it.** `heartbeat_duration`
+  is not inert: `Policy::effective_heartbeat_duration_secs`
+  (`tamga-api/src/features/policies/model.rs:262-264`) returns the policy value and uses 600s only
+  as the null fallback, and the cull job's claim query selects on
+  `COALESCE(p.heartbeat_duration, 600)` (`tamga-api/src/workers/machine_jobs.rs:213`). But there is
+  no `get_policy` and no `get_machine` here, and the licence resource carries no policy
+  relationship, so nothing in this crate can discover the real window — every interval it documents
+  is computed against the 600s fallback. `next_heartbeat_at` is **not** a workaround: the server
+  derives it from the window on the row, and the policy join exists only on the read queries this
+  crate exposes no route for, so on the create / ping-heartbeat / reset-heartbeat responses it is
+  always `last_heartbeat_at + 600s`. Under a policy with a shorter window a caller pinging on the
+  600s assumption pings too slowly and its machines go `DEAD` on schedule. Say so plainly in docs;
+  do not imply the SDK adapts. Adding a policy-aware scheduler is a later turn.
 - **Auth is enforced everywhere.** A missing credential is `401`, an insufficient one `403`; the two
   are distinct states and must not be conflated in error handling. A licence key is scoped to its
   own licence — validating or checking out someone else's returns `403`. Authenticating with a

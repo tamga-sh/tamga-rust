@@ -518,12 +518,24 @@ pub struct PolicyAttributes {
     /// [`crate::models::machine::HeartbeatStatus::Dead`] machine keeps its
     /// row and its seat indefinitely.
     pub require_heartbeat: bool,
-    /// ⚠️ Declared here but **not actually driving the heartbeat window** —
-    /// the server hardcodes 600s for machines / 30s for processes
-    /// regardless of this value. See
-    /// [`crate::models::machine::HeartbeatStatus`]'s doc comment. The
-    /// process figure is doubly inert: no live code path evaluates a process
-    /// heartbeat at all (see [`crate::models::machine::Pid`]).
+    /// Heartbeat window in seconds. **This drives the machine heartbeat
+    /// window**: the server uses this value when set and falls back to 600s
+    /// (10 min) only when it is null — `effective_window_secs` prefers it,
+    /// and the cull job's claim query selects on
+    /// `COALESCE(p.heartbeat_duration, 600)`.
+    ///
+    /// ⚠️ Knowing that does not help a caller here, because nothing in this
+    /// crate can fetch a [`Policy`]: there is no `get_policy`, and the
+    /// licence resource carries no policy relationship. This crate therefore
+    /// assumes the 600s fallback everywhere, which is wrong under any policy
+    /// that sets this field lower. Learn the value out of band — from
+    /// whoever provisions the policy — and set the ping interval explicitly.
+    /// See [`crate::models::machine::HeartbeatStatus`]'s doc comment.
+    ///
+    /// Processes are unaffected: their window is a separate hardcoded 30s
+    /// that this field never touches, and it is inert regardless since no
+    /// live code path evaluates a process heartbeat at all (see
+    /// [`crate::models::machine::Pid`]).
     pub heartbeat_duration: Option<i32>,
     /// ⚠️ Deserialize with [`HeartbeatCullStrategy`] yourself if needed —
     /// kept as a raw `String` here (matching the server's own

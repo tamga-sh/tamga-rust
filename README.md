@@ -242,6 +242,15 @@ stayed cryptographically valid forever.
   a scheduler should keep pinging through `DEAD`; treat a `404` from the ping —
   not the status — as the signal to re-activate
   (`src/models/machine.rs::HeartbeatStatus`).
+- The machine heartbeat window is set by `policy.heartbeat_duration`; 600s is
+  only the fallback used when that column is null. This crate cannot read it —
+  there is no `get_policy` or `get_machine`, and the licence resource carries no
+  policy relationship — so it assumes 600s throughout. `next_heartbeat_at` on
+  the create/ping/reset responses is computed against the same fallback and will
+  not reveal a shorter window either. Under a policy that sets one, choose the
+  ping interval yourself from out-of-band knowledge of the policy, or machines
+  will go `DEAD` while the client believes it is pinging often enough
+  (`src/models/machine.rs::HeartbeatStatus`).
 - The server does not reap process rows. The 30-second process heartbeat window
   and its delete-on-expiry sweep exist in a worker that has no call site and no
   scheduler tick, so no process is ever marked dead and no row is ever removed.
