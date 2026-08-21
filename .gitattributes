@@ -1,0 +1,8 @@
+# The cross-SDK fingerprint vectors are compared byte-for-byte against hashes
+# produced by an independent implementation. Never let a checkout rewrite
+# their line endings: a future vector carrying a literal newline inside a
+# value would hash differently on Windows than on Linux, which is one SDK
+# disagreeing with itself across two operating systems — the failure the
+# shared fixture exists to prevent, arriving by a route the spec does not
+# cover.
+tests/fixtures/fingerprint/*.json -text

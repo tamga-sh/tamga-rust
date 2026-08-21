@@ -284,6 +284,22 @@ impl ClientConfigBuilder {
 #[derive(Debug, Clone)]
 pub struct Client {
     pub(crate) http: reqwest::Client,
+    /// Identical to `http` except that it follows **no** redirects.
+    ///
+    /// Used only by [`Client::artifact_download_url`]. That route answers
+    /// `303 See Other` to a presigned storage URL unless asked not to, and
+    /// `reqwest`'s default policy follows up to 10 redirects — carrying this
+    /// client's `Authorization` header along whenever the hop stays on the
+    /// same host and port, which a deployment fronting object storage on its
+    /// own origin does. `?redirect=false` is what actually prevents the 303,
+    /// and this is the second line: if a server or an intermediary ever
+    /// answers one anyway, it surfaces as a non-success status instead of
+    /// being followed.
+    ///
+    /// Deliberately not applied to `http`: every other route ships in a
+    /// patch release, and none of them redirects today, so tightening their
+    /// behaviour is not this change's to make.
+    pub(crate) no_redirect_http: reqwest::Client,
     pub(crate) config: ClientConfig,
 }
 
@@ -297,7 +313,17 @@ impl Client {
             .user_agent(concat!("tamga-rust/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(crate::TamgaError::Http)?;
-        Ok(Client { http, config })
+        let no_redirect_http = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .user_agent(concat!("tamga-rust/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(crate::TamgaError::Http)?;
+        Ok(Client {
+            http,
+            no_redirect_http,
+            config,
+        })
     }
 
     /// Builds a request against `{base_url}{path}`, applying the configured
@@ -310,8 +336,23 @@ impl Client {
         path: &str,
         otp: Option<&str>,
     ) -> reqwest::RequestBuilder {
+        self.request_on(&self.http, method, path, otp)
+    }
+
+    /// [`Self::request`] against an explicitly chosen underlying client.
+    ///
+    /// Exists so [`Self::artifact_download_url`] can use the
+    /// redirect-disabled client while every other endpoint keeps the default
+    /// one; see the `no_redirect_http` field for why the two differ.
+    fn request_on(
+        &self,
+        http: &reqwest::Client,
+        method: reqwest::Method,
+        path: &str,
+        otp: Option<&str>,
+    ) -> reqwest::RequestBuilder {
         let url = format!("{}{path}", self.config.base_url());
-        let mut builder = self.http.request(method, url);
+        let mut builder = http.request(method, url);
         if let Some((name, value)) = self.config.auth.header() {
             builder = builder.header(name, value);
         }
@@ -2129,6 +2170,332 @@ impl Client {
         }
         let envelope: Envelope = response.json().await?;
         Ok(UpgradeCheck::Available(Box::new(envelope.data)))
+    }
+
+    // ── Artifacts ────────────────────────────────────────────────────────
+    //
+    // `Role::LicenseToken` already carried `artifact.read`, so the listing and
+    // show routes were always reachable with a licence key. Only the bytes
+    // were blocked: `artifact.download` was in no role's default list at all,
+    // so the download route — which did exist — answered `403` to the
+    // credential this SDK is built around. The server granted it to
+    // `Role::LicenseToken` and gated the route on the owning release's access
+    // check in the same change.
+    //
+    // Create, update, delete and upload stay out of scope deliberately:
+    // `artifact.create`/`update`/`delete` are absent from that role, so a
+    // licence key cannot reach them at all.
+
+    /// `GET /releases/{release_id}/artifacts` — the artifacts a release
+    /// distributes.
+    ///
+    /// Keyset paginated, like [`Self::list_components`] and
+    /// [`Self::list_machine_processes`] and unlike [`Self::list_machines`]:
+    /// pass the last row's `id` as `after` to advance. `limit` is clamped
+    /// server-side to `1..=100` and defaults to 25; the response carries no
+    /// page metadata, so a short page is the only end-of-listing signal.
+    ///
+    /// Requires `artifact.read`, which `Role::LicenseToken` now holds.
+    ///
+    /// Note this route checks the permission and nothing else — unlike
+    /// [`Self::artifact_download_url`], it does **not** enforce the owning
+    /// release's access gate, so a CLOSED release's artifact metadata lists
+    /// here even though its bytes cannot be fetched.
+    pub async fn list_release_artifacts(
+        &self,
+        release_id: uuid::Uuid,
+        limit: Option<u32>,
+        after: Option<uuid::Uuid>,
+    ) -> Result<Vec<crate::models::artifact::ArtifactResource>, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            data: Vec<crate::models::artifact::ArtifactResource>,
+        }
+
+        let path = format!("/releases/{release_id}/artifacts");
+        let mut builder = self.request(reqwest::Method::GET, &path, None);
+        if let Some(limit) = limit {
+            builder = builder.query(&[("limit", limit.to_string())]);
+        }
+        if let Some(after) = after {
+            builder = builder.query(&[("page[after]", after.to_string())]);
+        }
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// `GET /artifacts/{artifact_id}` — one artifact's metadata.
+    ///
+    /// `redirect_url` is **absent** here; only
+    /// [`Self::artifact_download_url`] populates it.
+    ///
+    /// Requires `artifact.read`. Like the listing, this route enforces the
+    /// permission alone and not the owning release's gate.
+    pub async fn get_artifact(
+        &self,
+        artifact_id: uuid::Uuid,
+    ) -> Result<crate::models::artifact::ArtifactResource, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            data: crate::models::artifact::ArtifactResource,
+        }
+
+        let path = format!("/artifacts/{artifact_id}");
+        let builder = self.request(reqwest::Method::GET, &path, None);
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// `GET /artifacts/{artifact_id}/actions/download?redirect=false` — the
+    /// artifact with its short-lived presigned storage URL in
+    /// [`crate::models::artifact::ArtifactAttributes::redirect_url`].
+    ///
+    /// # `redirect=false` is a security requirement, not a preference
+    ///
+    /// Left to itself this route answers **`303 See Other`** pointing at the
+    /// storage host. `reqwest` follows up to 10 redirects by default and this
+    /// crate sets no `reqwest::redirect::Policy`, so the request *would* be followed
+    /// automatically — and every request this client makes carries either an
+    /// `Authorization: License …` header or a `?token=` query parameter.
+    ///
+    /// What `reqwest` does with the credential across that hop was measured
+    /// against the version this crate builds on, not inferred — see
+    /// `measured_reqwest_strips_authorization_across_an_origin_boundary` and
+    /// `measured_reqwest_keeps_authorization_within_one_origin` in
+    /// `tests/artifacts.rs`:
+    ///
+    /// - **cross-origin**, the `Authorization` header is dropped. The usual
+    ///   S3 case does not leak the key.
+    /// - **same-origin**, it arrives intact. This is not hypothetical: the
+    ///   server's `s3_endpoint` and `s3_force_path_style` settings allow
+    ///   object storage on the API's own origin, and that configuration hands
+    ///   the licence key to the storage host.
+    ///
+    /// The mitigation is headers-only, so it says nothing about this crate's
+    /// other transport. That was measured too: a `?token=` credential does
+    /// **not** survive either hop, because a redirect replaces the URL rather
+    /// than merging query strings
+    /// (`measured_a_query_string_credential_does_not_survive_either_hop`).
+    ///
+    /// A directly-set `Cookie` header *does* survive a same-origin hop, where
+    /// `Authorization` also would. Nothing here sends one — the cookie
+    /// transport is deliberately unimplemented
+    /// (`crate::transport`, and reqwest's `cookies` feature is off) — but
+    /// `measured_a_directly_set_cookie_header_survives_a_same_origin_hop`
+    /// records it so adding that transport cannot quietly reintroduce the
+    /// hazard. Three runtimes have already shown three different behaviours
+    /// here, so none of this is portable reasoning; it is what this reqwest
+    /// does.
+    ///
+    /// There is a second reason not to follow the redirect that holds in
+    /// **every** configuration, credentials aside: following it buffers the
+    /// artifact's bytes before anything can reject them, and an artifact
+    /// routinely exceeds any sane response cap — the server admits uploads up
+    /// to 1 GiB, and this method would then try to parse that as JSON.
+    ///
+    /// So this method defends twice. `redirect=false` is sent
+    /// unconditionally — there is no code path here that omits it — and the
+    /// request goes out on a redirect-disabled client, so a `303` from a
+    /// server or intermediary that ignored the parameter surfaces as a
+    /// non-success status rather than being followed. The URL is returned for
+    /// the caller to fetch **with no credentials attached**.
+    /// [`Self::download_artifact`] does exactly that; a caller who wants to
+    /// stream to disk should use this method and fetch the URL itself, again
+    /// with an unauthenticated client.
+    ///
+    /// Treat the returned URL as a bearer capability: it grants the bytes to
+    /// anyone holding it until it expires. Do not log it.
+    ///
+    /// # `ttl`
+    ///
+    /// Seconds of validity for the presigned URL. The server **validates**
+    /// rather than clamps: outside `[60s, 1 week]` it answers `422
+    /// PRESIGN_TTL_INVALID` (`artifacts/service.rs:33`).
+    ///
+    /// Note that code is **not** the `TTL_INVALID` the checkout routes emit
+    /// (`check_out_license.rs:48`), so it does **not** land on
+    /// [`crate::TamgaError::TtlInvalidApi`] — the only typed TTL case this
+    /// crate has. It arrives as the generic [`crate::TamgaError::Api`];
+    /// match on `code` if you need to tell it apart. Adding a variant for it
+    /// is not available: `TamgaError` is public and not `#[non_exhaustive]`,
+    /// so that would be a breaking change.
+    ///
+    /// `None` leaves the server's own 300s default in place. Sub-second
+    /// precision is truncated — the parameter is whole seconds on the wire.
+    ///
+    /// # A `403` here is not necessarily an auth misconfiguration
+    ///
+    /// This route enforces the owning **release's** read gate
+    /// (`releases::service::enforce_release_access` — distribution strategy,
+    /// suspension, expiry, entitlement) in addition to the `artifact.download`
+    /// permission. A CLOSED release's binary is refused to a caller who holds
+    /// the permission and whose licence is in perfect order. Check the
+    /// release's distribution strategy and the licence's entitlements before
+    /// concluding the token is wrong — [`Self::get_artifact`] and
+    /// [`Self::list_release_artifacts`] succeeding while this returns `403`
+    /// is the signature of exactly that.
+    pub async fn artifact_download_url(
+        &self,
+        artifact_id: uuid::Uuid,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<crate::models::artifact::ArtifactResource, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            data: crate::models::artifact::ArtifactResource,
+        }
+
+        let path = format!("/artifacts/{artifact_id}/actions/download");
+        // Unconditional: see this method's doc comment. There is no code path
+        // here that lets the 303 be followed.
+        let mut builder = self
+            .request_on(&self.no_redirect_http, reqwest::Method::GET, &path, None)
+            .query(&[("redirect", "false")]);
+        if let Some(ttl) = ttl {
+            builder = builder.query(&[("ttl", ttl.as_secs().to_string())]);
+        }
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// Fetches an artifact's bytes: [`Self::artifact_download_url`], then an
+    /// **unauthenticated** GET of the presigned URL.
+    ///
+    /// The second request deliberately goes through `self.http` directly
+    /// rather than through this client's request builder, so it carries no
+    /// `Authorization` header and no `?token=` parameter — the same
+    /// deliberate exception [`Self::health`] makes, for a different reason.
+    /// Handing a Tamga credential to a storage host is the failure this
+    /// design exists to prevent, and
+    /// `download_artifact_sends_no_credential_to_the_storage_host` pins it.
+    ///
+    /// # `max_bytes`
+    ///
+    /// Required, not defaulted, because the right ceiling is the caller's to
+    /// choose and the wrong one is an out-of-memory crash: the server accepts
+    /// uploads up to 1 GiB and this method buffers the whole artifact in
+    /// memory. Enforced twice — once against `Content-Length` before any body
+    /// is read, then again across the streamed chunks, since a
+    /// `Content-Length` is a claim by the storage host rather than a fact.
+    /// Exceeding it is [`crate::error::ArtifactDownloadError::TooLarge`], and the partial
+    /// buffer is dropped.
+    ///
+    /// To stream to disk instead, or to download something larger than fits
+    /// in memory, call [`Self::artifact_download_url`] and fetch the URL
+    /// yourself — with an unauthenticated client.
+    ///
+    /// # Timeout
+    ///
+    /// The client's configured request timeout (45s by default) covers this
+    /// whole call, body included. That is ample for the API round trip and
+    /// easily too short for a large artifact on a slow link; raise it via
+    /// [`ClientConfigBuilder::timeout`] or stream the URL yourself.
+    ///
+    /// # Integrity
+    ///
+    /// The bytes are **not** checked against
+    /// [`crate::models::artifact::ArtifactAttributes::checksum`]. No algorithm is declared on the
+    /// wire — the server only infers one from the string's shape — so
+    /// verifying here would mean guessing, and a guessed pass is worse than
+    /// no check. Verify against your own upload-side convention.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::error::ArtifactDownloadError::Api`] for the URL request (including the
+    /// `403` that a CLOSED release produces — see
+    /// [`Self::artifact_download_url`]), and
+    /// [`crate::error::ArtifactDownloadError::StorageStatus`] for the storage host, most
+    /// often a `403` from a URL that expired between issue and use.
+    ///
+    /// The server-supplied URL is checked to be `http`/`https` before it is
+    /// fetched — see
+    /// [`crate::error::ArtifactDownloadError::UnsupportedRedirectScheme`].
+    pub async fn download_artifact(
+        &self,
+        artifact_id: uuid::Uuid,
+        ttl: Option<std::time::Duration>,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, crate::error::ArtifactDownloadError> {
+        use crate::error::ArtifactDownloadError as E;
+
+        let artifact = self.artifact_download_url(artifact_id, ttl).await?;
+        let url = artifact
+            .attributes
+            .redirect_url
+            .ok_or(E::MissingRedirectUrl)?;
+
+        // `redirectUrl` is server-supplied, so this is a URL this crate did
+        // not choose. Parsing successfully does not make it an HTTP URL —
+        // `file:`, `data:` and `ftp:` all parse — so the two acceptable
+        // schemes are named explicitly. reqwest would refuse the others
+        // anyway, but as an opaque transport error rather than something a
+        // caller can act on.
+        let parsed = reqwest::Url::parse(&url).map_err(|_| E::MalformedRedirectUrl)?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(E::UnsupportedRedirectScheme {
+                    scheme: scheme.to_string(),
+                })
+            }
+        }
+
+        // `self.http` carries the timeout and User-Agent but no credential:
+        // auth is applied per-request in `Self::request`, which this
+        // deliberately bypasses.
+        let response = self.http.get(parsed).send().await.map_err(E::Fetch)?;
+
+        if !response.status().is_success() {
+            return Err(E::StorageStatus {
+                status: response.status().as_u16(),
+            });
+        }
+
+        // Cheap rejection before a single body byte is read.
+        //
+        // This cannot change the *outcome*: the streaming guard below would
+        // reject the same download on the same input, and deleting this block
+        // leaves the whole suite green — measured, not assumed. It is a
+        // bandwidth optimisation, not a correctness guard, so it is
+        // deliberately not pinned by a test of its own. The streaming guard is
+        // the one that must hold, and
+        // `the_ceiling_still_holds_when_the_host_sends_no_content_length`
+        // exercises it against a server that sends no `Content-Length` at all,
+        // which is the case this block cannot cover.
+        if let Some(len) = response.content_length() {
+            if len > max_bytes {
+                return Err(E::TooLarge { limit: max_bytes });
+            }
+        }
+
+        let mut body = Vec::new();
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await.map_err(E::Fetch)? {
+            // Re-checked per chunk: `Content-Length` is the storage host's
+            // claim, and it can be absent (chunked transfer) or wrong.
+            if body.len() as u64 + chunk.len() as u64 > max_bytes {
+                return Err(E::TooLarge { limit: max_bytes });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     // ── Health ───────────────────────────────────────────────────────────

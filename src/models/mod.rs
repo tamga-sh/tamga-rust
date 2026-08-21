@@ -3,6 +3,9 @@
 //!
 //! Module layout:
 //!
+//! - [`artifact`] — `ArtifactResource`, the binary a release distributes.
+//!   Read-only: `Role::LicenseToken` holds `artifact.read`/`artifact.download`
+//!   but no create/update/delete. Mixed casing — `redirectUrl` but `created`.
 //! - [`license`] — `LicenseResource`.
 //! - [`validation`] — `ScopeObject` (8 fields), `ValidationMeta`,
 //!   `ValidationCode` (24 variants, 16 reachable today).
@@ -28,6 +31,7 @@
 //! orchestration lives in [`crate::client`]; cryptographic verification
 //! lives in [`crate::crypto`] and [`crate::checkout`].
 
+pub mod artifact;
 pub mod entitlement;
 pub mod health;
 pub mod license;
