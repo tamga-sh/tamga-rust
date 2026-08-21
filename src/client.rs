@@ -1396,10 +1396,17 @@ impl Client {
     /// machine reports `Dead` indefinitely with its seat intact. Keep pinging
     /// it; the only terminal signal is a `404` from the ping itself.
     ///
-    /// ⚠️ Not licence-scoped. The handler checks the `machine.read`
-    /// permission and the account, and nothing else, so a licence-key caller
-    /// can read any machine in the account — not only its own licence's.
-    /// Do not present that as an access control this SDK enforces.
+    /// ⚠️ Not licence-scoped, and the resource cannot tell you whose it is.
+    /// The handler checks the `machine.read` permission and the account and
+    /// nothing else — no machine route calls the server's
+    /// `require_license_scope` — so a licence-key caller can read (and patch,
+    /// and delete) any machine in the account. The response is no help
+    /// either: [`crate::models::machine::MachineAttributes`] carries no
+    /// `license_id` and no `relationships`, because the server's serializer
+    /// emits neither. To establish that a machine is on a given licence you
+    /// must ask the server, via
+    /// [`ListMachinesOptions::license_id`]. Do not present any of this as an
+    /// access control this SDK enforces.
     pub async fn get_machine(
         &self,
         machine_id: uuid::Uuid,
@@ -1488,30 +1495,45 @@ impl Client {
         })
     }
 
-    /// The machine registered against `license_id` with exactly this
-    /// `fingerprint`, or `None`.
+    /// The machine with exactly this `fingerprint`, or `None`.
     ///
     /// There is **no `filter[fingerprint]`** on the machine collection — the
     /// only fingerprint-aware parameter is the free-text `filter[q]`, which
-    /// is a case-insensitive `ILIKE '%term%'` across `name`, `hostname` *and*
-    /// `fingerprint`. So the search narrows the page and the exact match is
-    /// made here, on `attributes.fingerprint`, byte for byte. A substring or
-    /// case-folded hit on somebody else's hostname must not come back as
-    /// "your machine".
+    /// the server turns into a case-insensitive `ILIKE '%term%'` across
+    /// `name`, `hostname` *and* `fingerprint`, truncated to 200 characters.
+    /// So the search narrows the page and the exact match is made here, on
+    /// `attributes.fingerprint`, byte for byte. Both steps err toward a
+    /// superset, so a substring or case-folded hit on somebody else's
+    /// hostname can never come back as a match.
     ///
-    /// `license_id` is sent as `filter[license]` and is not optional, for the
-    /// same reason: the collection is account-scoped, so an unfiltered search
-    /// can return a machine belonging to a different licence.
+    /// **`license_id` decides what a hit means, and the distinction is not
+    /// cosmetic.**
+    ///
+    /// - `Some(id)` sends `filter[license]`, so every row the server returns
+    ///   is on that licence. This is the only way to establish that, because
+    ///   [`crate::models::machine::MachineAttributes`] carries **no
+    ///   `license_id` and no `relationships`** — the server's machine
+    ///   serializer emits neither. A machine that arrives without the filter
+    ///   cannot be attributed to a licence at all.
+    /// - `None` searches the whole account. Use it to answer "does anything
+    ///   hold this fingerprint?" — a diagnostic — never to conclude "this
+    ///   machine is mine". Under a policy with `machine_uniqueness_strategy`
+    ///   set to `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` the answer can be
+    ///   a machine on a different licence, and nothing on the resource says
+    ///   so.
+    ///
+    /// [`Self::activate_machine_idempotent`] passes `Some`, for exactly that
+    /// reason.
     pub async fn find_machine_by_fingerprint(
         &self,
-        license_id: uuid::Uuid,
+        license_id: Option<uuid::Uuid>,
         fingerprint: &str,
     ) -> Result<Option<crate::models::machine::MachineResource>, crate::TamgaError> {
         let mut page_number = 1i64;
         loop {
             let page = self
                 .list_machines(ListMachinesOptions {
-                    license_id: Some(license_id),
+                    license_id,
                     search: Some(fingerprint.to_string()),
                     page_number: Some(page_number),
                     page_size: Some(MAX_OFFSET_PAGE_SIZE),
@@ -1556,6 +1578,22 @@ impl Client {
     ///
     /// `memory` and `disk` are **megabytes**, exactly as on
     /// [`CreateMachineOptions`].
+    ///
+    /// ⚠️ **This is a write whose response can still report
+    /// [`crate::models::machine::HeartbeatStatus::Dead`].** It is the
+    /// counterexample to the "a write response can never say `Dead`" rule:
+    /// the `UPDATE` touches no heartbeat column, so the status is derived
+    /// from a `last_heartbeat_at` that is as old as it was before the call.
+    /// The verdict is genuine — branch on it. `next_heartbeat_at`, however,
+    /// is *not*: the statement's `RETURNING` list selects no policy column,
+    /// so the deadline is computed against the 600s fallback here, exactly
+    /// as on ping and create.
+    ///
+    /// ⚠️ Not licence-scoped. `machine.update` is in the `LicenseToken`
+    /// role's permission set and no machine route calls the server's
+    /// `require_license_scope`, so a licence key can patch any machine in the
+    /// account — as it can [`Self::delete_machine`] any of them. Reported
+    /// upstream; do not read this method as enforcing an ownership boundary.
     pub async fn update_machine(
         &self,
         machine_id: uuid::Uuid,
@@ -1659,6 +1697,16 @@ impl Client {
     /// [`MachineActivation::reused`] set; not found means the fingerprint is
     /// held elsewhere and the original `409` propagates untouched.
     ///
+    /// The scoping is not a preference, it is the only thing that makes the
+    /// answer checkable. A [`crate::models::machine::MachineResource`] carries
+    /// no `license_id` and no `relationships` — the server's serializer emits
+    /// neither — so a machine found by an account-wide search cannot be
+    /// attributed to a licence by inspecting it. `filter[license]` is where
+    /// that guarantee comes from. An account-wide search is still available
+    /// (`find_machine_by_fingerprint(None, …)`) for the diagnostic question
+    /// "is anything holding this fingerprint?", which is a different question
+    /// from "is this mine".
+    ///
     /// ⚠️ `auto_delete_on_overage` **never deletes an adopted machine.**
     /// Rolling back is only meaningful for a row this call created; deleting
     /// a pre-existing machine because the licence is over its limit would
@@ -1681,7 +1729,7 @@ impl Client {
             Ok(machine) => (Some(machine), false),
             Err(err) if matches!(err, crate::TamgaError::FingerprintTaken(_)) => {
                 match self
-                    .find_machine_by_fingerprint(license_id, fingerprint)
+                    .find_machine_by_fingerprint(Some(license_id), fingerprint)
                     .await?
                 {
                     Some(existing) => (Some(existing), true),
@@ -1961,8 +2009,15 @@ impl Client {
     /// regardless, which is what makes case 2 reachable at all — an
     /// unauthenticated call cannot be entitlement-filtered.
     ///
-    /// An unknown `product_id` is `404`
-    /// ([`crate::TamgaError::NotFound`]), not `NoUpdateOffered`.
+    /// Four of [`UpgradeQuery`]'s fields are required server-side —
+    /// `product`, `platform`, `filetype`, `version` — so they are not
+    /// `Option` here; omitting one is a `400`, not a broader search.
+    ///
+    /// The failure outcomes are not all folded into `NoUpdateOffered`: an
+    /// unknown `product_id` is `404` ([`crate::TamgaError::NotFound`]), and
+    /// the product's distribution-strategy gate runs before any of the
+    /// release logic, so a non-`Open` product answers `401`/`403` to a caller
+    /// whose credential it does not accept.
     pub async fn check_for_upgrade(
         &self,
         query: UpgradeQuery,

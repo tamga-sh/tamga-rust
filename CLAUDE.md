@@ -173,7 +173,19 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   terminal signal is a `404 NOT_FOUND`, and no `DEAD` branch belongs against a *ping* response —
   put it on the checkout path instead. `Client::get_machine` and `Client::list_machines` carry it
   for the same reason and are now exposed, so a `DEAD` branch against either of those is live code
-  too — the durable rule is write-vs-read, not a route list.
+  too.
+- **The durable rule is not write-vs-read: `PATCH /machines/{id}` is a write that *can* report
+  `DEAD`.** The bullet above used to generalise to "a write response can never say `DEAD`", and
+  `update_machine` is the counterexample. Its `UPDATE` touches `name`/`ip`/`hostname`/`platform`/
+  `cores`/`memory`/`disk`/`metadata` and never goes near `last_heartbeat_at`, so
+  `heartbeat_status_within` judges a timestamp as old as it was before the call and the verdict is
+  genuine. State the rule as: **a response cannot say `DEAD` only when the server derived the
+  status from a `last_heartbeat_at` that same request just wrote** — ping, reset, create. Nothing
+  else is exempt.
+  `next_heartbeat_at` splits *differently* on the same route: `queries::update`'s
+  `RETURNING` list selects no `policy_heartbeat_duration` (`#[sqlx(default)]` leaves it `None`), so
+  the deadline there is on the 600s fallback even though the status is real. Two fields, two
+  different splits, one route — do not collapse them.
 - **Processes are never reaped — a registered process leaks its slot.** `process_process_heartbeat`
   and `find_and_claim_dead_processes` implement the 30s window and the delete-on-expiry sweep, but
   a `grep` over the server tree finds two hits for each: their own definitions, and no call sites.
@@ -248,8 +260,14 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   validate and check-out. Both are gated on `license.read` only, which the `LicenseToken` role
   holds, so a licence key reads any licence in the account with `attributes.key` in plaintext.
   Reported upstream. The SDK exposes both anyway (a client needs its own policy to size a
-  heartbeat interval) and must never describe them as scoped. `GET /machines` and
-  `GET /machines/{id}` have the same shape: account-scoped, `machine.read`, no licence check.
+  heartbeat interval) and must never describe them as scoped. **No machine route calls
+  `require_license_scope` either**, and `Role::LicenseToken` holds `machine.read`,
+  `machine.update` *and* `machine.delete` — so a licence key can read, patch and delete any machine
+  in the account. That is an extension of the same upstream issue; do not attempt a client-side
+  fix, and do not word any doc as if the surface were scoped.
+  A machine resource is no help in narrowing it: `machines/serializer.rs:20-37` emits neither
+  `license_id` nor a `relationships` block, so the only way to establish that a machine belongs to
+  a given licence is to have asked the server with `filter[license]`.
 - **A licence key cannot call `GET /policies/{id}`.** `PolicyResourcePolicy::can_read` requires
   `policy.read`, and `Role::LicenseToken`'s fixed permission set does not include it. Permissions
   are *intersected* with the token's (`effective_permissions`), so no configuration adds it back.

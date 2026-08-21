@@ -294,12 +294,13 @@ verified before.
   ping writes `last_heartbeat_at = now` and derives the status from that same
   timestamp, so it always answers `Alive` or `Resurrected`; reset and create
   answer `NotStarted`; and validate never returns `HEARTBEAT_DEAD`. It *does*
-  arrive on any response built from a **read**: the machine embedded in a
-  `.mach` file, the one returned by `Client::generate_offline_proof`, and the
-  ones from `Client::get_machine` and `Client::list_machines`. All four are
-  read from the row rather than echoed from a write, so their
-  `heartbeat_status` is a real staleness verdict and can be `Dead`. Branch on
-  it there, not against a ping.
+  arrive anywhere else: the machine embedded in a `.mach` file, the one
+  returned by `Client::generate_offline_proof`, the ones from
+  `Client::get_machine` and `Client::list_machines` — and the one from
+  `Client::update_machine`, which is a *write* but never touches the
+  heartbeat column, so its verdict is genuine too. The rule is not
+  write-vs-read: a response is `Dead`-free only when the server derived the
+  status from a `last_heartbeat_at` that same request just wrote.
   Never stop the ping loop on a status; a `404` from the ping is the only
   terminal signal and the cue to re-activate
   (`src/models/machine.rs::HeartbeatStatus`).
@@ -312,8 +313,10 @@ verified before.
   is computed against the 600s fallback there whatever the policy says, and a
   client trusting it pings too slowly and its machines go `DEAD` on schedule.
   `MachineAttributes::observed_heartbeat_window` recovers the genuine window,
-  but only from a response the server built from a read — a verified machine
-  file, an offline proof, `get_machine`, or `list_machines`
+  but only from a response whose query joined `policies` — a verified machine
+  file, an offline proof, `get_machine`, or `list_machines`. Note that
+  `update_machine` falls on the *fallback* side of that split even though its
+  `heartbeat_status` is real: the two fields do not divide the same way
   (`src/models/machine.rs::HeartbeatStatus`).
 - Reading the policy goes through `Client::get_license_policy(license_id)`, not
   `Client::get_policy(policy_id)`. The latter needs the `policy.read`
@@ -323,9 +326,13 @@ verified before.
 - `Client::get_license` and `Client::get_license_policy` are **not**
   licence-scoped server-side: unlike validate and check-out they never call the
   server's `require_license_scope`, so a licence key can read any licence in
-  the account, `attributes.key` in plaintext included. The same is true of
-  `Client::get_machine` and `Client::list_machines`. Reported upstream; the SDK
-  cannot narrow what the server returns.
+  the account, `attributes.key` in plaintext included. No machine route calls
+  it either, and the licence-key role holds `machine.read`, `machine.update`
+  and `machine.delete` — so a licence key can read, patch and delete any
+  machine in the account. Reported upstream; the SDK cannot narrow what the
+  server allows. A machine resource carries no `license_id` and no
+  `relationships`, so `ListMachinesOptions::license_id` is the only way to
+  establish which licence a machine belongs to.
 - The server does not reap process rows. The 30-second process heartbeat window
   and its delete-on-expiry sweep exist in a worker that has no call site and no
   scheduler tick, so no process is ever marked dead and no row is ever removed.

@@ -216,7 +216,7 @@ async fn find_machine_by_fingerprint_matches_exactly_not_by_substring() {
         .await;
 
     let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(license_id, "fp-abc")
+        .find_machine_by_fingerprint(Some(license_id), "fp-abc")
         .await
         .unwrap()
         .expect("the exact fingerprint is present");
@@ -239,7 +239,7 @@ async fn find_machine_by_fingerprint_returns_none_when_only_near_misses_come_bac
         .await;
 
     let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(license_id, "fp-abc")
+        .find_machine_by_fingerprint(Some(license_id), "fp-abc")
         .await
         .unwrap();
     assert!(found.is_none());
@@ -272,11 +272,44 @@ async fn find_machine_by_fingerprint_walks_past_the_first_page() {
         .await;
 
     let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(license_id, "fp-abc")
+        .find_machine_by_fingerprint(Some(license_id), "fp-abc")
         .await
         .unwrap()
         .expect("found on the second page");
     assert_eq!(found.id, wanted);
+}
+
+#[tokio::test]
+async fn find_machine_by_fingerprint_can_search_the_whole_account() {
+    // The diagnostic mode: "is anything holding this fingerprint?". It answers
+    // a different question from "is this mine" — the resource carries no
+    // license_id, so a hit here cannot be attributed to a licence.
+    let mock_server = MockServer::start().await;
+    let held = uuid::Uuid::from_u128(4);
+
+    Mock::given(method("GET"))
+        .and(path("/v1/accounts/acc-123/machines"))
+        .and(query_param("filter[q]", "fp-abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [machine_json(held, "fp-abc", "ALIVE")],
+            "meta": page_meta(1, 100, 1, 1),
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let found = test_client(&mock_server)
+        .find_machine_by_fingerprint(None, "fp-abc")
+        .await
+        .unwrap()
+        .expect("something in the account holds it");
+    assert_eq!(found.id, held);
+
+    let requests = mock_server.received_requests().await.unwrap();
+    let query = requests[0].url.query().unwrap_or_default();
+    assert!(
+        !query.contains("filter%5Blicense%5D") && !query.contains("filter[license]"),
+        "an account-wide search must not send a licence filter: {query}"
+    );
 }
 
 #[tokio::test]
@@ -313,6 +346,44 @@ async fn update_machine_sends_a_json_api_envelope() {
         .await
         .unwrap();
     assert_eq!(machine.attributes.fingerprint, "fp-abc123");
+}
+
+#[tokio::test]
+async fn update_machine_is_the_write_whose_response_can_still_say_dead() {
+    // The counterexample to "a write response can never say DEAD". The UPDATE
+    // touches no heartbeat column, so the status is judged against a
+    // last_heartbeat_at as old as it was before the call. Its RETURNING list
+    // selects no policy column either, so next_heartbeat_at is on the 600s
+    // fallback — the two fields split differently on this one route.
+    let mock_server = MockServer::start().await;
+    let machine_id = uuid::Uuid::nil();
+
+    let mut body = machine_json(machine_id, "fp-abc123", "DEAD");
+    body["attributes"]["last_heartbeat_at"] = serde_json::json!("2026-01-01T00:00:00Z");
+    body["attributes"]["next_heartbeat_at"] = serde_json::json!("2026-01-01T00:10:00Z");
+
+    Mock::given(method("PATCH"))
+        .and(path(format!("/v1/accounts/acc-123/machines/{machine_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": body })))
+        .mount(&mock_server)
+        .await;
+
+    let machine = test_client(&mock_server)
+        .update_machine(
+            machine_id,
+            UpdateMachineOptions {
+                hostname: Some("renamed-host".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(machine.attributes.heartbeat_status, HeartbeatStatus::Dead);
+    assert_eq!(
+        machine.attributes.observed_heartbeat_window(),
+        Some(std::time::Duration::from_secs(600)),
+        "the fallback, not the policy value — this route joins no policy"
+    );
 }
 
 #[tokio::test]

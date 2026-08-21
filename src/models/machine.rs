@@ -17,10 +17,12 @@
 //!   "the last ping is older than that window" — it is not a tombstone. Under
 //!   the default policy (`require_heartbeat = false`) nothing is ever culled,
 //!   so a machine stays `DEAD` indefinitely with its row and its seat still
-//!   in place. A ping, reset or create response can never *say* `DEAD` — a
-//!   response built from a read can: a verified machine file, an offline
-//!   proof, `get_machine`, `list_machines`. Never stop the ping loop on a
-//!   status; a `404` from the ping is the only terminal signal.
+//!   in place. A response can only fail to say `DEAD` when it derives the
+//!   status from a `last_heartbeat_at` that same request just wrote — ping,
+//!   reset, create. A verified machine file, an offline proof, `get_machine`,
+//!   `list_machines` and even `update_machine` (a write that never touches
+//!   the heartbeat column) all can. Never stop the ping loop on a status; a
+//!   `404` from the ping is the only terminal signal.
 //! - `ComponentResource`: `machine_id`, `fingerprint`, `name`, `metadata`.
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
@@ -72,23 +74,29 @@ pub struct MachineAttributes {
     pub name: Option<String>,
     /// Machine heartbeat state — see [`HeartbeatStatus`].
     ///
-    /// On the write responses (create, ping-heartbeat, reset-heartbeat) this
-    /// is only ever `NotStarted`, `Alive` or `Resurrected`. Inside a verified
-    /// machine file, or on a [`crate::Client::generate_offline_proof`]
-    /// response, it is a real staleness verdict and **can be `Dead`**. Match
-    /// exhaustively either way.
+    /// `Dead` is unreachable on a response the server derived from a
+    /// `last_heartbeat_at` it just wrote — create, ping-heartbeat,
+    /// reset-heartbeat. Everywhere else it is a real staleness verdict and
+    /// **can be `Dead`**: a verified machine file,
+    /// [`crate::Client::generate_offline_proof`],
+    /// [`crate::Client::get_machine`], [`crate::Client::list_machines`], and
+    /// — despite being a write — [`crate::Client::update_machine`], which
+    /// never touches the heartbeat column. Match exhaustively either way.
     pub heartbeat_status: HeartbeatStatus,
     /// Timestamp of the last `ping-heartbeat` call.
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Server-computed next-expected-heartbeat deadline, if derivable.
     ///
-    /// ⚠️ Which window this reflects depends on the route. The create,
-    /// ping-heartbeat and reset-heartbeat queries do not join the policy, so
-    /// there this is `last_heartbeat_at + 600s` even under a policy that asks
-    /// for less — not a usable source for the real window. Machine checkout
-    /// and offline proof resolve through a policy-joined read, so there it is
-    /// the genuine deadline and `next_heartbeat_at - last_heartbeat_at`
-    /// recovers the effective window.
+    /// ⚠️ Which window this reflects depends on the route, and it is a
+    /// *different* split from the one `heartbeat_status` follows. The create,
+    /// ping-heartbeat, reset-heartbeat **and update** queries do not join
+    /// `policies`, so there this is `last_heartbeat_at + 600s` even under a
+    /// policy that asks for less — not a usable source for the real window.
+    /// Machine checkout, offline proof, `GET /machines/{id}` and the machine
+    /// list all resolve through a policy-joined read, so there it is the
+    /// genuine deadline and `next_heartbeat_at - last_heartbeat_at` recovers
+    /// the effective window. See
+    /// [`MachineAttributes::observed_heartbeat_window`].
     pub next_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Timestamp of the last machine-file checkout.
     pub last_check_out_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -116,6 +124,7 @@ impl MachineAttributes {
     /// | [`crate::Client::get_machine`], [`crate::Client::list_machines`] | the real `policy.heartbeat_duration` |
     /// | [`crate::Client::check_out_machine`], [`crate::Client::generate_offline_proof`] | the real `policy.heartbeat_duration` |
     /// | [`crate::Client::create_machine`], [`crate::Client::ping_heartbeat`], [`crate::Client::reset_heartbeat`] | the 600s **fallback**, whatever the policy says |
+    /// | [`crate::Client::update_machine`] | the 600s **fallback** — its `UPDATE … RETURNING` selects no policy column |
     ///
     /// Nothing on the response distinguishes the two, which is why this is a
     /// method on the attributes rather than a field: the caller has to know
@@ -165,18 +174,28 @@ impl MachineAttributes {
 /// culled, so a machine stays `Dead` **forever** while its row, and the seat
 /// it holds against the licence, are still there.
 ///
-/// ⚠️ **A ping, reset, create or validate response can never say `Dead` — a
-/// checked-out machine file can.** The write paths are `Dead`-free by
-/// construction: `ping-heartbeat` writes `last_heartbeat_at = NOW()` and
-/// *then* derives the status from that same timestamp, so its age is ~0 and
-/// the answer is always `Alive` or `Resurrected`; `reset-heartbeat` nulls the
-/// column and answers `NotStarted`; `POST /machines` never sets it and
-/// answers `NotStarted`. The licence `validate` path never constructs
+/// ⚠️ **A ping, reset, create or validate response can never say `Dead`.**
+/// Those four are `Dead`-free by construction: `ping-heartbeat` writes
+/// `last_heartbeat_at = NOW()` and *then* derives the status from that same
+/// timestamp, so its age is ~0 and the answer is always `Alive` or
+/// `Resurrected`; `reset-heartbeat` nulls the column and answers
+/// `NotStarted`; `POST /machines` never sets it and answers `NotStarted`. The
+/// licence `validate` path never constructs
 /// [`crate::models::validation::ValidationCode::HeartbeatDead`] either.
 ///
-/// Checkout is the exception, and it is a genuine staleness verdict: the
-/// server resolves the machine through a read query nobody has just written
-/// to, then serializes it into the file.
+/// ⚠️ **The rule is not "writes cannot say `Dead`" — `PATCH /machines/{id}`
+/// is a write that can.** The durable form is narrower: a response cannot say
+/// `Dead` when the server derived the status from a `last_heartbeat_at`
+/// *this request just wrote*. `update_machine` writes `name`, `ip`,
+/// `hostname`, `platform`, `cores`, `memory`, `disk` and `metadata` and never
+/// goes near the heartbeat column, so the timestamp it judges is as old as it
+/// was before the call and the verdict is genuine. Stating it as write-vs-read
+/// makes `update_machine` look safe to skip, which is how a `Dead` machine
+/// stops being noticed on the one route an application calls routinely.
+///
+/// Checkout is one of the exceptions, and it is a genuine staleness verdict:
+/// the server resolves the machine through a read query nobody has just
+/// written to, then serializes it into the file.
 /// [`crate::checkout::machine_file::verify_machine_file`] returns a
 /// [`MachineResource`], so the `heartbeat_status` inside a verified
 /// `.machine` file **can be `Dead`** — as can the one on the
