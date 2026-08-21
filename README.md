@@ -181,6 +181,52 @@ server-timestamp escape hatch. Lighter-weight machine proofs
 (`"v1x0.<base64 signature>"`, always RSA-2048 PKCS#1 v1.5 / SHA-256) verify
 through `tamga::proof::verify_offline_proof`.
 
+### Surviving a signing-key rotation
+
+Verifying against one embedded key collapses two very different outcomes into
+one error. A file signed before the account rotated its signing key is
+authentic — but it fails against the current key with exactly the error a
+forgery produces, and nothing distinguishes "refresh your keys" from "refuse
+this customer".
+
+Verify through a key set instead. The `kid` claim inside the signed payload
+names the signer, `tamga::crypto::ed25519::key_id` computes that id from any
+public key you hold, and the account publishes its whole key history —
+retired keys included — at `GET /signing-keys`:
+
+```rust
+use tamga::checkout::key_set::SigningKeySet;
+use tamga::checkout::license_file::verify_license_file_with_key_set;
+use tamga::error::CheckoutError;
+
+// One call, cacheable for the life of the process. Or, with no network at
+// all: SigningKeySet::from_public_keys([KEY_A_B64, KEY_B_B64])?
+let keys = client.signing_key_set().await?;
+
+match verify_license_file_with_key_set(&pem, &keys, Some(license_key)) {
+    Ok(verified) => { /* authentic and in date */ }
+    Err(CheckoutError::UnknownSigningKey { kid }) => {
+        // Signed by a key this set does not hold — a stale key set after a
+        // rotation, not a forgery. Re-fetch, or ship an application update.
+    }
+    Err(e) => { /* tampered, expired, or malformed — refuse it */ }
+}
+```
+
+Two constraints worth knowing before you build on this:
+
+- **A raw licence key cannot call `GET /signing-keys`.** It is gated on
+  `account.read`, which `Role::LicenseToken` does not hold and cannot be
+  granted, so an embedded licence-key client gets `403` — fetch the set with a
+  back-office token and pin the public keys in the application with
+  `SigningKeySet::from_public_keys`, or proxy the call through your own
+  backend.
+- **Ed25519 only.** Rotation mints Ed25519 keys and nothing else is published,
+  and `.mach` files signed under an RSA or ECDSA scheme carry a `kid` naming
+  the account's *Ed25519* key regardless of what actually signed them. Verify
+  those with `verify_machine_file` and the licence's own `scheme`; a rotation
+  is not a distinguishable outcome for them.
+
 ### Compatibility warning: both offline formats are v2 only
 
 `alg` must end in `+v2`, and the signed `meta` claims (`iat`, `exp`, `jti`,

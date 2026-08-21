@@ -7,6 +7,11 @@
 //! - [`license_file`] — `.lic` parse + verify (format v2 only). Ed25519-only
 //!   signature (independent of the license's own `scheme`), HKDF-SHA256 key
 //!   derivation when encrypted, and enforcement of the signed `exp` claim.
+//! - [`key_set`] — [`key_set::SigningKeySet`], the trusted Ed25519 keys a
+//!   file may have been signed by, indexed by `kid`. Verifying through one
+//!   separates "signed by a key I do not have" (a stale key set after a
+//!   rotation) from "signature does not verify" (a forgery); verifying against
+//!   a single embedded key cannot tell the two apart.
 //! - [`machine_file`] — `.mach` parse + verify (format v2 only). Signature
 //!   scheme taken from the license's `scheme` field
 //!   (Ed25519/RSA-PKCS1/RSA-PSS/ECDSA-P256; `RSA_2048_JWT_RS256` explicitly
@@ -24,5 +29,6 @@
 //! the machine path runs through the server's `FieldEncryption` rather than
 //! sealing the bytes inline. Do not "unify" the two readers.
 
+pub mod key_set;
 pub mod license_file;
 pub mod machine_file;

@@ -2000,6 +2000,62 @@ impl Client {
         Ok(policy.attributes.recommended_heartbeat_interval())
     }
 
+    // ── Signing keys ─────────────────────────────────────────────────────
+
+    /// `GET /signing-keys` — every Ed25519 signing key the account has held,
+    /// retired ones included.
+    ///
+    /// Retired keys are the point. An offline file names its signer with a
+    /// `kid` claim, and a file signed before the last rotation needs the key
+    /// that signed it, not the current one; without this route a client's only
+    /// options are to fail verification or to accept any key, and the second
+    /// defeats signing entirely. Feed the result to
+    /// [`crate::checkout::key_set::SigningKeySet::from_resources`], or use
+    /// [`Self::signing_key_set`] to do both in one call.
+    ///
+    /// ⚠️ **A raw licence key cannot call this route.** It is gated on
+    /// `account.read`, and `Role::LicenseToken` — what
+    /// [`crate::transport::AuthTransport::License`] resolves to — holds a
+    /// fixed permission set that does not include it, so an embedded
+    /// licence-key client gets [`crate::TamgaError::Forbidden`] here no matter
+    /// how the account is configured. Same shape as
+    /// `GET /policies/{id}`, and unlike that one there is no equivalent route
+    /// reachable through a permission the role does hold. Two ways round it:
+    /// fetch the key set with a back-office token and ship the public keys
+    /// with the application
+    /// ([`crate::checkout::key_set::SigningKeySet::from_public_keys`] takes
+    /// them directly), or have the application's own backend proxy this call.
+    ///
+    /// The resource `id` **is** the `kid` — not a UUID like every other
+    /// resource this crate returns. See [`crate::models::signing_key`].
+    pub async fn list_signing_keys(
+        &self,
+    ) -> Result<Vec<crate::models::signing_key::SigningKeyResource>, crate::TamgaError> {
+        self.send_json_api(reqwest::Method::GET, "/signing-keys", None, None)
+            .await
+    }
+
+    /// [`Self::list_signing_keys`], returned as a ready-to-verify
+    /// [`crate::checkout::key_set::SigningKeySet`].
+    ///
+    /// One call, and the result is worth holding for the life of the process:
+    /// a rotation adds a key rather than invalidating the ones already there,
+    /// so a cached set only ever goes stale for files signed *after* it was
+    /// fetched — which is exactly the case
+    /// [`crate::error::CheckoutError::UnknownSigningKey`] names, and the
+    /// signal to fetch again.
+    ///
+    /// Carries the same licence-key restriction as
+    /// [`Self::list_signing_keys`].
+    pub async fn signing_key_set(
+        &self,
+    ) -> Result<crate::checkout::key_set::SigningKeySet, crate::TamgaError> {
+        let keys = self.list_signing_keys().await?;
+        Ok(crate::checkout::key_set::SigningKeySet::from_resources(
+            &keys,
+        ))
+    }
+
     // ── Auto-update ──────────────────────────────────────────────────────
 
     /// `GET /releases/actions/upgrade` — is there a newer release this caller

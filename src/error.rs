@@ -400,6 +400,30 @@ pub enum CheckoutError {
     /// (`422 TTL_INVALID`), checked before the round trip.
     #[error("ttl out of range: {0}")]
     TtlOutOfRange(String),
+    /// The file's `kid` claim names a signing key the supplied
+    /// [`crate::checkout::key_set::SigningKeySet`] does not hold.
+    ///
+    /// **This is not a forgery.** It is the outcome a genuine file signed
+    /// before a key rotation produces against a key set that has not caught up
+    /// — a stale set, an application shipped with one pinned key, or an
+    /// account whose public key was never published. A tampered file whose
+    /// `kid` *is* known fails as
+    /// [`CheckoutError::Crypto`]`(`[`CryptoError::VerificationFailed`]`)`
+    /// instead, and separating the two is the entire point of verifying
+    /// through a key set: the first calls for refreshing the keys, the second
+    /// for refusing the file.
+    ///
+    /// Nothing about the file has been trusted at this point. The `kid` is
+    /// read from bytes whose signature has not been checked and is used only
+    /// to select from keys the caller already trusts — it can never introduce
+    /// one.
+    #[error("no signing key for kid {kid} in the supplied key set")]
+    UnknownSigningKey {
+        /// The `kid` the file claims, verbatim. Log it next to
+        /// [`crate::checkout::key_set::SigningKeySet::kids`] to see what the
+        /// set did hold.
+        kid: String,
+    },
     /// Signature verification or decryption itself failed — see
     /// [`CryptoError`].
     #[error(transparent)]
