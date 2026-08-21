@@ -152,6 +152,19 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   revives it — the update is a bare `SET last_heartbeat_at = NOW()` with no resurrection check — so
   a scheduler must ping *through* `DEAD` instead of stopping and re-activating on it. The only real
   row-is-gone signal is a `404 NOT_FOUND` from the ping itself; hang re-activation off that.
+- **Processes are never reaped — a registered process leaks its slot.** `process_process_heartbeat`
+  and `find_and_claim_dead_processes` implement the 30s window and the delete-on-expiry sweep, but
+  a `grep` over the server tree finds two hits for each: their own definitions, and no call sites.
+  `scheduler.rs`'s `TICKS` wires only the machine side (`cull_dead_machines` →
+  `find_and_claim_dead_machines` → `process_machine_heartbeat`); there is no process tick. So the
+  observable behaviour is the opposite of what the code reads like: no process is ever marked dead,
+  `process.heartbeat.dead` is never emitted, and no row is ever deleted. `create_process` increments
+  the licence's `machines_process_count` and nothing decrements it on its own, so a leaked process
+  holds its slot against `max_processes` forever. Only an explicit
+  `DELETE /v1/accounts/{account_id}/processes/{process_id}` releases it — that route **does** exist
+  server-side and decrements the counter, but this crate exposes no method for it, so a Rust caller
+  currently cannot release the slot at all. Same defect class as the `DEAD` bullet above: a claim
+  that is true of code that never runs.
 - **Auth is enforced everywhere.** A missing credential is `401`, an insufficient one `403`; the two
   are distinct states and must not be conflated in error handling. A licence key is scoped to its
   own licence — validating or checking out someone else's returns `403`. Authenticating with a

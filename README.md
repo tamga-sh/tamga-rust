@@ -242,6 +242,15 @@ stayed cryptographically valid forever.
   a scheduler should keep pinging through `DEAD`; treat a `404` from the ping —
   not the status — as the signal to re-activate
   (`src/models/machine.rs::HeartbeatStatus`).
+- The server does not reap process rows. The 30-second process heartbeat window
+  and its delete-on-expiry sweep exist in a worker that has no call site and no
+  scheduler tick, so no process is ever marked dead and no row is ever removed.
+  `Client::create_process` increments the licence's `machines_process_count`
+  against the policy's `max_processes` and nothing decrements it on its own, so
+  a process registered and abandoned holds its slot permanently. Releasing it
+  needs an explicit `DELETE /processes/{id}` — the route exists server-side but
+  this crate does not expose it yet, so keep PIDs stable and register only
+  what is worth tracking (`src/models/machine.rs::Pid`).
 - Quick-validate's `last_validated_at` write is skipped whenever the request
   carries an `Origin` header, and the two responses are identical. This SDK
   never sets `Origin`, but a proxy that does turns the write off silently

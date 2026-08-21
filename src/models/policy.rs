@@ -521,7 +521,9 @@ pub struct PolicyAttributes {
     /// ⚠️ Declared here but **not actually driving the heartbeat window** —
     /// the server hardcodes 600s for machines / 30s for processes
     /// regardless of this value. See
-    /// [`crate::models::machine::HeartbeatStatus`]'s doc comment.
+    /// [`crate::models::machine::HeartbeatStatus`]'s doc comment. The
+    /// process figure is doubly inert: no live code path evaluates a process
+    /// heartbeat at all (see [`crate::models::machine::Pid`]).
     pub heartbeat_duration: Option<i32>,
     /// ⚠️ Deserialize with [`HeartbeatCullStrategy`] yourself if needed —
     /// kept as a raw `String` here (matching the server's own

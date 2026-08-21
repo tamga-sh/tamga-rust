@@ -1097,6 +1097,14 @@ impl Client {
     /// `NOT_STARTED`), a process starts `ALIVE` immediately — its
     /// `last_heartbeat_at` is set at creation, not left unset until a first
     /// ping.
+    ///
+    /// ⚠️ This call increments the licence's `machines_process_count` against
+    /// the policy's `max_processes`, and **nothing ever decrements it on its
+    /// own**: the server reaps no process rows (see
+    /// [`crate::models::machine::Pid`]), and this crate exposes no delete.
+    /// A short-lived process registered here consumes its slot permanently,
+    /// so register only what is worth tracking, and reuse a stable PID rather
+    /// than minting a fresh one per run.
     pub async fn create_process(
         &self,
         machine_id: uuid::Uuid,
@@ -1112,10 +1120,15 @@ impl Client {
             .await
     }
 
-    /// `POST /processes/{process_id}/actions/ping` — no body. ⚠️ The
-    /// process heartbeat window is a **hardcoded 30 seconds** with no
-    /// resurrection grace period — see [`crate::models::machine::Pid`]'s
-    /// doc comment.
+    /// `POST /processes/{process_id}/actions/ping` — no body, sets
+    /// `last_heartbeat_at = now`.
+    ///
+    /// ⚠️ Nothing server-side reads that timestamp today: the 30-second
+    /// window and the sweep that would delete an expired process both live in
+    /// a worker with no call site and no scheduler tick, so **no process row
+    /// is ever reaped** — see [`crate::models::machine::Pid`]'s doc comment.
+    /// Ping on a ~10s timer anyway; the reaper needs only a scheduler entry
+    /// to go live.
     pub async fn ping_process(
         &self,
         process_id: uuid::Uuid,

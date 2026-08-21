@@ -21,10 +21,10 @@
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
 //!   provide `From<u32>`/`From<i32>` that stringify on serialize, so callers
-//!   holding a native numeric PID don't have to hand-format it. Process
-//!   heartbeat window is a hardcoded **30 seconds** (much shorter than the
-//!   machine's 600s) with no resurrection grace period — a dead process row
-//!   is deleted immediately, no `KEEP_DEAD` equivalent.
+//!   holding a native numeric PID don't have to hand-format it. The 30s
+//!   process heartbeat window exists only in a worker the server never
+//!   runs: **no process row is ever reaped**, so a leaked process holds its
+//!   slot against `max_processes` until a client deletes it explicitly.
 
 /// The `machines` JSON:API resource: `{ id, type, attributes }`. Field set
 /// matches the Tamga API's actual `MachineResource`/`MachineAttributes`
@@ -221,10 +221,11 @@ pub struct ProcessResource {
 }
 
 /// Attributes of a [`ProcessResource`]. Unlike a [`MachineResource`], there
-/// is no `heartbeat_status` field — a process's aliveness is entirely a
-/// function of `last_heartbeat_at` versus the hardcoded 30s window (see
-/// [`Pid`]'s doc comment); a dead process row is deleted immediately, not
-/// tracked in a `DEAD`/`RESURRECTED` state like machines.
+/// is no `heartbeat_status` field, and there is no server-side state machine
+/// behind one either: `last_heartbeat_at` is written on create and on every
+/// ping, serialized back out, and **never read by any live code path**. No
+/// equivalent of `DEAD`/`RESURRECTED` is ever computed for a process, and no
+/// process row is ever deleted by the server — see [`Pid`]'s doc comment.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProcessAttributes {
     /// The process ID, as a wire string — see [`Pid`].
@@ -247,11 +248,29 @@ pub struct ProcessAttributes {
 /// this type exists so callers holding a native numeric PID don't have to
 /// hand-format it; `From<u32>`/`From<i32>` stringify on construction.
 ///
-/// ⚠️ Process heartbeat window is a **hardcoded 30 seconds** — much shorter
-/// than a machine's 600s — with **no resurrection grace period**: a dead
-/// process row is deleted immediately, no `KEEP_DEAD` equivalent. An SDK
-/// monitoring a long-running process must ping at least every ~10s to stay
-/// safely inside this window.
+/// ⚠️ **The server does not currently reap process rows.** A 30-second
+/// window and a delete-on-expiry sweep are both written — much shorter than
+/// a machine's 600s, with no resurrection grace period and no `KEEP_DEAD`
+/// equivalent — but the worker holding them has no call site and the job
+/// scheduler wires no process tick, so as shipped nothing runs it: no
+/// process is ever marked dead, no `process.heartbeat.dead` event is ever
+/// emitted, and no row is ever removed. `last_heartbeat_at` is written and
+/// echoed back, never acted on.
+///
+/// The practical consequence is a leak, not an eviction: a process registered
+/// by [`crate::Client::create_process`] increments the licence's
+/// `machines_process_count` and holds that slot against the policy's
+/// `max_processes` **forever**, however long ago it stopped pinging. Only an
+/// explicit delete releases it, and this crate exposes no method for that
+/// today, so a caller here has no way to release the slot — track it as a
+/// gap, and register only what is worth tracking. Keeping a PID stable across
+/// restarts at least bounds the damage: re-registering the same one is
+/// refused with [`crate::TamgaError::PidTaken`] rather than creating a second
+/// row, so the original row and its one slot are what stay in use.
+///
+/// Keep [`crate::Client::ping_process`] on a ~10s timer regardless. The
+/// reaper is written and needs only a scheduler entry to go live, so a client
+/// that stops pinging is relying on a bug staying unfixed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pid(pub(crate) String);
 
