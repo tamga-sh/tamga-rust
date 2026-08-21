@@ -84,11 +84,23 @@ pub struct ScopeObject {
     /// the whole validate call, so this SDK omits the field from the
     /// request body entirely. See the struct's doc comment.
     #[serde(skip_serializing)]
+    #[deprecated(
+        note = "the server refuses this field with `422 SCOPE_NOT_SUPPORTED`, failing the whole \
+                validate call, so this SDK never sends it. Setting it is silently discarded and \
+                constrains nothing — remove it, or move the check to a field the server enforces \
+                (`entitlements`, `fingerprint`, `product`, `policy`, `user`, `environment`)."
+    )]
     pub version: Option<String>,
     /// **Deprecated and never sent.** Same as `version` — the server
     /// answers `422 SCOPE_NOT_SUPPORTED`, so this SDK omits the field. See
     /// the struct's doc comment.
     #[serde(skip_serializing)]
+    #[deprecated(
+        note = "the server refuses this field with `422 SCOPE_NOT_SUPPORTED`, failing the whole \
+                validate call, so this SDK never sends it. Setting it is silently discarded and \
+                constrains nothing — remove it, or move the check to a field the server enforces \
+                (`entitlements`, `fingerprint`, `product`, `policy`, `user`, `environment`)."
+    )]
     pub checksum: Option<String>,
 }
 
@@ -325,6 +337,9 @@ mod tests {
     }
 
     #[test]
+    // Setting the refused fields is the whole point of this test, so the
+    // deprecation warning they now raise is expected here.
+    #[allow(deprecated)]
     fn scope_object_never_serializes_the_two_refused_fields() {
         // Setting either used to be a harmless no-op. It now fails the
         // whole validate call with 422 SCOPE_NOT_SUPPORTED, so a caller
@@ -341,6 +356,9 @@ mod tests {
     }
 
     #[test]
+    // Reading `scope.version` back is the point: deprecated on the way out,
+    // still parsed on the way in.
+    #[allow(deprecated)]
     fn scope_object_still_deserializes_the_two_refused_fields() {
         // Skipped on the way out, not on the way in — round-tripping a
         // stored scope must not silently drop what the caller wrote.

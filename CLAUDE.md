@@ -129,7 +129,9 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   server-side to compare against, and a scope that silently passes is worse than one that is
   missing: it gets relied on. That `422` fails the *whole* validate call, so the SDK skips
   serializing both fields: a caller that still sets one degrades to an unscoped validate rather
-  than to no validate at all. `scope.entitlements` takes entitlement **codes**, not UUIDs, and is
+  than to no validate at all. Because that degradation is silent, both fields also carry
+  `#[deprecated]` — the compiler is the only thing left that can tell a caller their constraint
+  is being discarded. Test fixtures that set them deliberately need `#[allow(deprecated)]`. `scope.entitlements` takes entitlement **codes**, not UUIDs, and is
   satisfied by inherited rows as well as direct ones.
 - **`page[after]` is inert on `GET /licenses/{id}/entitlements`.** The listing unions direct and
   policy-inherited rows, so no single keyset cursor describes it and the server applies no cursor

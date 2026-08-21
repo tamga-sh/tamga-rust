@@ -217,8 +217,10 @@ stayed cryptographically valid forever.
 - `ScopeObject`'s `version` and `checksum` fields are **refused** by the
   server: setting either fails the whole validate call with
   `422 SCOPE_NOT_SUPPORTED` before any check runs, so the SDK never sends
-  them. The other six — including `entitlements` and `fingerprint` — are
-  genuinely enforced (`src/models/validation.rs`).
+  them. Both carry `#[deprecated]`, so setting one is a compiler warning
+  rather than a constraint you silently lose. The other six — including
+  `entitlements` and `fingerprint` — are genuinely enforced
+  (`src/models/validation.rs`).
 - `GET /licenses/{id}/entitlements` accepts `page[after]` and ignores it. The
   listing is a union of direct and policy-inherited rows, so there is no
   cursor; `limit` (default 25, max 100) is the only bound, and a licence with

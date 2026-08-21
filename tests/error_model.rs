@@ -258,6 +258,9 @@ async fn license_not_allowed_401_is_classified_as_an_auth_gate_failure() {
 }
 
 #[tokio::test]
+// Setting the refused fields is the whole point of this test, so the
+// deprecation warning they now raise is expected here.
+#[allow(deprecated)]
 async fn scope_not_supported_is_unreachable_because_the_sdk_never_sends_those_fields() {
     // A caller that still sets `version`/`checksum` must degrade to an
     // unscoped validate, not to a 422 that kills the whole call.
