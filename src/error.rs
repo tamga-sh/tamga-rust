@@ -644,6 +644,44 @@ mod tests {
     }
 
     #[test]
+    fn every_code_carrying_variant_still_exposes_its_code() {
+        // `from_json_api_error` and `json_api_error` are two hand-written
+        // match arms over the same vocabulary: the first maps a wire code
+        // onto a typed variant, the second lists every variant that still
+        // carries the server body. The compiler forces the second to mention
+        // a new variant, but not to put it in the right group — dropping one
+        // into the `None` arm would silently break `code()`, and with it
+        // `limit_exceeded` and `license_auth_failure`, which are built on it.
+        // Round-trip every mapped code to keep the two in step.
+        let carries_a_body = [
+            "CHECK_IN_NOT_REQUIRED",
+            "LICENSE_NOT_ENCRYPTED",
+            "LICENSE_KEY_MISSING",
+            "FINGERPRINT_TAKEN",
+            "PID_TAKEN",
+            "NOT_FOUND",
+            "UNAUTHORIZED",
+            "FORBIDDEN",
+            "INTERNAL_SERVER_ERROR",
+            "DATASET_INVALID",
+            "TTL_INVALID",
+            "SCHEME_NOT_SUPPORTED",
+            // No dedicated variant — falls back to `Api`, which carries the
+            // body just the same. This is the route every un-typed code
+            // takes, including `SCOPE_NOT_SUPPORTED`.
+            "SCOPE_NOT_SUPPORTED",
+        ];
+        for wire in carries_a_body {
+            let err = error_with_code("422", wire);
+            assert!(
+                err.json_api_error().is_some(),
+                "{wire} lost its server error body"
+            );
+            assert_eq!(err.code(), Some(wire), "code {wire}");
+        }
+    }
+
+    #[test]
     fn classifiers_return_none_for_errors_without_a_server_body() {
         let err = TamgaError::RateLimited {
             retry_after: Some(5),

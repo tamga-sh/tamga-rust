@@ -233,3 +233,51 @@ async fn has_entitlement_asks_for_the_servers_maximum_page_size() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn both_entitlement_listings_surface_a_server_error_as_a_typed_error() {
+    // `list_entitlements` and `list_license_entitlements` are two methods over
+    // the *same* route, differing only in the row type they parse into. Both
+    // parse `{ "data": [...] }` on success, so both have to classify a non-2xx
+    // body as an error document before attempting that parse — otherwise a 403
+    // reaches the caller as an opaque deserialization failure instead of
+    // `TamgaError::Forbidden`, and the reason the listing was refused is lost.
+    // Testing them together is what keeps the two from diverging.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+
+    // Not retryable (only 429 is), so each call asks exactly once.
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements"
+        )))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": "403",
+                "code": "FORBIDDEN",
+                "title": "Forbidden",
+                "detail": "this license key may not read entitlements",
+                "source": null,
+            }]
+        })))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+
+    let err = client
+        .list_entitlements(license_id, Some(100), None)
+        .await
+        .expect_err("a 403 body is not a listing");
+    assert!(matches!(err, tamga::TamgaError::Forbidden(_)));
+    assert_eq!(err.code(), Some("FORBIDDEN"));
+
+    let err = client
+        .list_license_entitlements(license_id, Some(100))
+        .await
+        .expect_err("a 403 body is not a listing");
+    assert!(matches!(err, tamga::TamgaError::Forbidden(_)));
+    assert_eq!(err.code(), Some("FORBIDDEN"));
+}

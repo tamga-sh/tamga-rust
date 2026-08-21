@@ -509,3 +509,66 @@ async fn ping_heartbeat_404_is_the_only_row_is_gone_signal() {
     let result = client.ping_heartbeat(machine_id).await;
     assert!(matches!(result, Err(TamgaError::NotFound(_))));
 }
+
+#[tokio::test]
+async fn activate_machine_surfaces_the_create_error_when_the_probe_also_fails() {
+    // The create-time limit path needs a second call to describe the licence:
+    // after `POST /machines` is refused it re-validates to build the
+    // over-limit `ValidationResult` the caller gets back. When that probe
+    // fails too there is nothing left to build, so the original create
+    // refusal propagates — surfacing the probe's error instead would hide
+    // why the activation actually failed and would misreport a policy
+    // decision as a server fault.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/machines"))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .set_body_json(validation_error_body("MACHINE_LIMIT_EXCEEDED")),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // The probe fails. 500 is not retryable (only 429 is), so this is asked
+    // exactly once.
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/actions/validate"
+        )))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": "500",
+                "code": "INTERNAL_SERVER_ERROR",
+                "title": "Internal Server Error",
+                "detail": "probe failed",
+                "source": null,
+            }]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let err = client
+        .activate_machine(
+            license_id,
+            "fp-abc123",
+            CreateMachineOptions::default(),
+            None,
+            true,
+        )
+        .await
+        .expect_err("both calls failed, so this cannot be an over-limit result");
+
+    // The create refusal, not the probe's 500: still classifiable as the
+    // policy-limit outcome it really was.
+    assert_eq!(
+        err.limit_exceeded(),
+        Some(tamga::error::LimitExceededCode::MachineLimitExceeded),
+        "the original create refusal must survive a failed probe"
+    );
+}
