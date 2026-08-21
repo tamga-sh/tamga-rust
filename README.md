@@ -107,6 +107,13 @@ Every request also carries a sanitized `Tamga-Version` header
 (`src/transport.rs::sanitize_version`), and the validate methods take an
 optional `otp` argument that becomes `Tamga-OTP` for 2FA-enabled accounts.
 
+`AuthTransport::License` has a server-side precondition: the licence's policy
+must set `authentication_strategy` to `LICENSE` or `MIXED`. That column
+defaults to `'TOKEN'`, under which a licence key is not an accepted credential
+at all and every request is refused with `401 LICENSE_NOT_ALLOWED`. It is a
+provisioning step, not something to retry — classify it with
+`TamgaError::license_auth_failure()`.
+
 ## Offline verification
 
 Check out a signed `.lic` (or `.mach`) file once, embed your account's public
@@ -187,10 +194,12 @@ stayed cryptographically valid forever.
   caller (`src/client.rs::Client::retry_delay`); without it the client falls
   back to exponential backoff plus jitter
   (`src/transport.rs::jitter_millis`). Auto-retry is scoped to every `GET`
-  plus five safe `POST` actions — `validate`, `validate-key`, `check-in`,
-  `check-out`, `ping` — and creates are deliberately excluded, since
-  repeating `POST /machines` risks burning a second seat
-  (`src/client.rs::Client::is_retryable`). Set
+  plus seven safe `POST` actions — `validate`, `validate-key`, `check-in`,
+  `check-out`, `ping`, `ping-heartbeat`, `reset-heartbeat` — and creates are
+  deliberately excluded, since repeating `POST /machines` risks burning a
+  second seat (`src/client.rs::Client::is_retryable`). Every request the
+  client sends goes through that wrapper, the raw-PEM checkout helpers
+  included. Set
   `ClientConfigBuilder::max_retries(0)` to handle it yourself; the exhausted
   case surfaces as `TamgaError::RateLimited { retry_after }`.
 - **Verification errors are deliberately coarse.** "Wrong key" and "tampered
@@ -202,26 +211,38 @@ stayed cryptographically valid forever.
 
 ## Known gaps
 
-- Only 14 of the 24 `ValidationCode` variants are reachable server-side today;
+- Only 16 of the 24 `ValidationCode` variants are reachable server-side today;
   all 24 are modelled, with an `Unknown(String)` fallback for future additions
   (`src/models/validation.rs`).
-- `ScopeObject`'s `entitlements`, `fingerprint`, `version` and `checksum`
-  fields are sent and parsed but not enforced server-side yet — do not treat
-  them as working constraints (`src/models/validation.rs`).
-- Auth is not enforced server-side on the licence/machine validate and
-  check-in endpoints yet, so `TamgaError::Unauthorized` is not reachable there
-  (`src/error.rs`). The SDK always sends the configured credentials anyway;
-  don't assume a bad credential is rejected today.
+- `ScopeObject`'s `version` and `checksum` fields are **refused** by the
+  server: setting either fails the whole validate call with
+  `422 SCOPE_NOT_SUPPORTED` before any check runs, so the SDK never sends
+  them. The other six — including `entitlements` and `fingerprint` — are
+  genuinely enforced (`src/models/validation.rs`).
+- `GET /licenses/{id}/entitlements` accepts `page[after]` and ignores it. The
+  listing is a union of direct and policy-inherited rows, so there is no
+  cursor; `limit` (default 25, max 100) is the only bound, and a licence with
+  more than 100 effective entitlements cannot be fully enumerated through that
+  route. Never loop on it (`src/client.rs::Client::list_entitlements`).
+- Auth **is** enforced server-side. A missing or unrecognized credential is
+  `401 UNAUTHORIZED`, a valid-but-insufficient one `403 FORBIDDEN`
+  (`src/error.rs`). Authenticating with a licence key also requires the
+  licence's policy to set `authentication_strategy` to `LICENSE` or `MIXED`;
+  the column defaults to `'TOKEN'`, under which every licence-key request is
+  refused with `401 LICENSE_NOT_ALLOWED` — a provisioning precondition, not
+  something to retry (`TamgaError::license_auth_failure`).
+- `Client::reset_heartbeat` and `Client::generate_offline_proof` are role-gated
+  and answer `403` for **every** licence-key caller; they need an
+  admin/developer/product/environment credential (`src/client.rs`).
+- Quick-validate's `last_validated_at` write is skipped whenever the request
+  carries an `Origin` header, and the two responses are identical. This SDK
+  never sets `Origin`, but a proxy that does turns the write off silently
+  (`src/client.rs::Client::quick_validate`).
 - Freshly created policies report `"DENY_ACCESS"` and `"NO_RESURRECTION"` as
   defaults, neither of which is a real variant. This crate treats any
   unrecognized policy-field value as the "no restriction" variant, matching
   actual server behaviour rather than the literal string
   (`src/models/policy.rs`).
-- The two raw-PEM checkout helpers, `Client::check_out_license` and
-  `Client::check_out_machine`, send without the retry wrapper — a `429` on
-  those surfaces immediately as `TamgaError::RateLimited` instead of being
-  retried (`src/client.rs`). The JSON:API variants
-  (`check_out_license_json`, `check_out_machine_json`) do retry.
 - The `blocking` cargo feature is declared but has no code behind it yet;
   there is no synchronous wrapper around `Client` today.
 - Release / auto-update checking is not part of this crate's surface.

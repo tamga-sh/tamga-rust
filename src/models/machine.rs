@@ -5,7 +5,10 @@
 //!
 //! - `MachineResource`: `fingerprint`, `name`, `ip`, `hostname`, `platform`,
 //!   `cores`, `memory`, `disk`, `metadata`, `heartbeat_status`, relationship
-//!   `license`.
+//!   `license`. ⚠️ `memory` and `disk` are **megabytes**, not bytes — the
+//!   server's own column comment says so, and these are the values that
+//!   feed the licence's `machines_memory_count`/`machines_disk_count`
+//!   totals and the `MEMORY_LIMIT_EXCEEDED`/`DISK_LIMIT_EXCEEDED` checks.
 //! - `HeartbeatStatus`: `NOT_STARTED` → `ALIVE` → `DEAD` → `RESURRECTED`.
 //!   Window is a **hardcoded 600s (10 min)**, not driven by
 //!   `policy.heartbeat_duration`. `DEAD` should be treated as "machine
@@ -42,9 +45,13 @@ pub struct MachineAttributes {
     pub fingerprint: String,
     /// CPU core count, if reported at registration.
     pub cores: Option<i32>,
-    /// Memory in bytes, if reported.
+    /// Memory in **megabytes**, if reported. Not bytes: reporting 16 GiB
+    /// as `17179869184` inflates the licence's `machines_memory_count` by
+    /// a factor of 1,048,576 and trips `MEMORY_LIMIT_EXCEEDED` on the next
+    /// activation against the same licence.
     pub memory: Option<i64>,
-    /// Disk in bytes, if reported.
+    /// Disk in **megabytes**, if reported — same units and same failure
+    /// mode as `memory`.
     pub disk: Option<i64>,
     /// IP address, if reported.
     pub ip: Option<String>,

@@ -96,24 +96,63 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   default) that a heartbeat timer reaches easily. `TamgaError::RateLimited` carries the server's
   `Retry-After`. Safe requests (`GET`, plus the licensing `actions/*` `POST`s) retry automatically
   with capped backoff; creates deliberately do not, because repeating an activation can burn a
-  second seat.
-- **Model all 24 `ValidationCode` variants, but only 14 are live.** `VALID` through `TOO_MANY_USES`
-  (14 values) are reachable. `NOT_FOUND` is declared but never emitted — the handler short-circuits
-  to HTTP 404 instead. The remaining 9 (`BANNED`, `ENTITLEMENTS_MISSING`, `TOO_MANY_USERS`,
-  `HEARTBEAT_DEAD`, `HEARTBEAT_NOT_STARTED`, `FINGERPRINT_SCOPE_MISMATCH`,
+  second seat. The limiter buckets per `(caller, route pattern)`, and with proxy headers untrusted
+  a whole fleet shares one bucket per route — `ping-heartbeat` and `reset-heartbeat` therefore
+  *must* stay on the retryable-suffix list. Neither ends with `/actions/ping` (that is the process
+  ping route), so a suffix list without them silently drops throttled heartbeats until the machine
+  is culled.
+- **Model all 24 `ValidationCode` variants, but only 16 are live.** Reachable: `VALID`,
+  `SUSPENDED`, `EXPIRED`, `OVERDUE`, the four `*_SCOPE_MISMATCH`es for product/policy/user/
+  environment, plus `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`, `TOO_MANY_MACHINES`,
+  `TOO_MANY_CORES`, `TOO_MUCH_MEMORY`, `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES` and `TOO_MANY_USES`.
+  `NOT_FOUND` is declared but never emitted — the handler short-circuits to HTTP 404 instead. The
+  remaining 7 (`BANNED`, `TOO_MANY_USERS`, `HEARTBEAT_DEAD`, `HEARTBEAT_NOT_STARTED`,
   `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`, `VERSION_SCOPE_MISMATCH`) are wired into
-  the enum for forward-compatibility but never actually returned. Use `#[serde(other)]` so a future
-  server-side addition doesn't hard-fail deserialization.
+  the enum for forward-compatibility but never actually returned; the last two are structurally
+  unreachable, since the scope fields that would produce them are refused first. Use
+  `#[serde(other)]` so a future server-side addition doesn't hard-fail deserialization.
+- **The five over-limit outcomes have create-time twins.** `POST /machines` runs the
+  machine/core/memory/disk checks through the policy's overage strategy: a permissive strategy
+  creates the row and defers the limit to validation, a strict one refuses with `422`
+  `MACHINE_LIMIT_EXCEEDED` / `CORE_LIMIT_EXCEEDED` / `MEMORY_LIMIT_EXCEEDED` /
+  `DISK_LIMIT_EXCEEDED`. Both shapes have to be handled; `error::LimitExceededCode` normalizes the
+  `422` onto the matching `ValidationCode`, and `Client::activate_machine` keeps the
+  create→validate→rollback path for the permissive case. Do not delete anything on the create-time
+  path — no row was created, and the machine holding the seat is somebody else's.
+- **Machine `memory` and `disk` are megabytes, not bytes.** They feed the licence's
+  `machines_memory_count`/`machines_disk_count` totals. A caller reporting 16 GiB as
+  `17179869184` inflates the total by ~10^6 and trips `MEMORY_LIMIT_EXCEEDED` on the next
+  activation against that licence.
 - **`ScopeObject` has 8 fields; 6 are enforced and 2 are refused.** `product`, `policy`, `user`,
   `environment`, `fingerprint` and `entitlements` are all checked server-side now. `version` and
   `checksum` return `422 SCOPE_NOT_SUPPORTED` — deliberately, because neither has anything
   server-side to compare against, and a scope that silently passes is worse than one that is
-  missing: it gets relied on.
+  missing: it gets relied on. That `422` fails the *whole* validate call, so the SDK skips
+  serializing both fields: a caller that still sets one degrades to an unscoped validate rather
+  than to no validate at all. `scope.entitlements` takes entitlement **codes**, not UUIDs, and is
+  satisfied by inherited rows as well as direct ones.
+- **`page[after]` is inert on `GET /licenses/{id}/entitlements`.** The listing unions direct and
+  policy-inherited rows, so no single keyset cursor describes it and the server applies no cursor
+  predicate; `limit` (default 25, max 100) is the only bound and there is no `meta`/`links` to
+  signal truncation. Never loop on that route — the same first page comes back forever. The
+  cursor on `GET /machines/{id}/components` is real and does advance; do not "fix" both together.
+  The list rows also carry an `inherited` flag the item route knows nothing about: an inherited
+  entitlement 404s on `GET .../entitlements/{id}`, so list-then-get-each is not a valid pattern.
+- **`reset-heartbeat` and `generate-offline-proof` are role-gated, not permission-gated.** Both
+  answer `403` for every `LicenseToken` caller, i.e. every raw licence-key client, no matter what
+  permissions the key holds. `reset-heartbeat` is the server's only way to unstick a wedged
+  heartbeat job, so an embedded client has no recovery path there — it needs a back-office
+  credential.
 - **Auth is enforced everywhere.** A missing credential is `401`, an insufficient one `403`; the two
   are distinct states and must not be conflated in error handling. A licence key is scoped to its
   own licence — validating or checking out someone else's returns `403`. Authenticating with a
   licence key also requires the policy's `authentication_strategy` to be `LICENSE` or `MIXED`; the
   default `TOKEN` yields `401 LICENSE_NOT_ALLOWED`, which is a provisioning matter, not an SDK bug.
+  `NONE` is a fourth legal value and behaves like `TOKEN` at this gate. Two more `401`s come from
+  the same gate: `LICENSE_SUSPENDED`, and `LICENSE_EXPIRED` when the policy's
+  `expiration_strategy` is `REVOKE_ACCESS` (the fourth legal value there — under the other three an
+  expired licence still authenticates and the expiry surfaces at validate). None of the three is
+  retryable; `error::LicenseAuthCode` classifies them.
 - **Policy defaults reference non-existent enum variants.** Freshly-created policies report
   `overage_strategy: "DENY_ACCESS"` and `heartbeat_resurrection_strategy: "NO_RESURRECTION"` — neither
   is a real variant of `OverageStrategy`/`HeartbeatResurrectionStrategy`. Both silently behave as

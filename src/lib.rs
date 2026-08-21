@@ -27,18 +27,36 @@
 //! safe requests are retried automatically first — see
 //! [`client::ClientConfigBuilder::max_retries`].
 //!
+//! ## Auth
+//!
+//! Auth is enforced on every endpoint: a missing or unrecognized credential
+//! is `401`, a valid-but-insufficient one `403`. Authenticating with a raw
+//! licence key ([`transport::AuthTransport::License`]) additionally requires
+//! the licence's policy to set `authentication_strategy` to `LICENSE` or
+//! `MIXED`. That column defaults to `'TOKEN'`, under which every
+//! licence-key request is refused with `401 LICENSE_NOT_ALLOWED` — a
+//! provisioning precondition, not a transient failure. See
+//! [`error::LicenseAuthCode`].
+//!
 //! ## Known server-side gaps
 //!
 //! Modelled here but not fully live server-side today:
 //!
-//! - Only 14 of the 24 [`models::validation::ValidationCode`] variants are
+//! - Only 16 of the 24 [`models::validation::ValidationCode`] variants are
 //!   reachable; the rest are declared for forward-compatibility.
-//! - The `entitlements`/`fingerprint`/`version`/`checksum` fields of
-//!   [`models::validation::ScopeObject`] are parsed but not enforced.
+//! - [`models::validation::ScopeObject`]'s `version` and `checksum` fields
+//!   are refused by the server (`422 SCOPE_NOT_SUPPORTED` fails the whole
+//!   validate call), so this crate never sends them. Its other six fields,
+//!   `entitlements` and `fingerprint` included, are enforced.
+//! - `GET /licenses/{id}/entitlements` ignores `page[after]`: the listing
+//!   is capped by `limit` (max 100) and cannot be paginated past it. See
+//!   [`client::Client::list_entitlements`].
 //! - Freshly created policies report `"DENY_ACCESS"`/`"NO_RESURRECTION"` —
 //!   neither is a real variant. See [`models::policy`] for how this crate
 //!   normalizes them.
-//! - Release/auto-update checking is not part of this crate's surface.
+//! - Release/auto-update checking is not part of this crate's surface. The
+//!   upgrade-check endpoint itself does work server-side; it is simply out
+//!   of scope here.
 
 // Promoted from `warn` to `deny` once doc coverage across the public API
 // was complete — a genuinely undocumented public item is now a build

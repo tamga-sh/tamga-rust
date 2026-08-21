@@ -27,23 +27,29 @@
 //! - Components & processes: [`Client::create_component`],
 //!   [`Client::list_components`], [`Client::create_process`],
 //!   [`Client::ping_process`].
-//! - Entitlements: [`Client::list_entitlements`], [`Client::get_entitlement`],
+//! - Entitlements: [`Client::list_entitlements`],
+//!   [`Client::list_license_entitlements`], [`Client::get_entitlement`],
 //!   [`Client::has_entitlement`].
 //!
 //! Every method sends the configured [`crate::transport::AuthTransport`]'s
-//! credentials, even on endpoints where server-side auth enforcement is not
-//! yet wired — this keeps callers forward-compatible with enforcement landing.
+//! credentials. Auth **is** enforced server-side on every endpoint here: a
+//! missing or unrecognized credential is `401`, a valid-but-insufficient one
+//! `403`. Licence-key auth additionally requires the licence's policy to set
+//! `authentication_strategy` to `LICENSE` or `MIXED` — the column defaults to
+//! `'TOKEN'`, under which every request with a licence key is refused with
+//! `401 LICENSE_NOT_ALLOWED`. See [`crate::error::LicenseAuthCode`].
 //!
-//! **Rate limiting.** Requests that go through the JSON:API and
-//! quick-validate paths are sent via `send_with_retry`, which retries a `429`
-//! up to [`ClientConfig::max_retries`] times using the server's `Retry-After`
+//! **Rate limiting.** Every request this client sends goes through
+//! `send_with_retry`, which retries a `429` up to
+//! [`ClientConfig::max_retries`] times using the server's `Retry-After`
 //! (capped at 60s) or jittered exponential backoff. Only safe requests
-//! qualify: every `GET`, plus `POST` on the five action suffixes
+//! qualify: every `GET`, plus `POST` on the seven action suffixes
 //! `/actions/validate`, `/actions/validate-key`, `/actions/check-in`,
-//! `/actions/check-out` and `/actions/ping`. Creates are excluded on purpose.
-//! The two raw-PEM helpers ([`Client::check_out_license`],
-//! [`Client::check_out_machine`]) send directly and surface a `429` as
-//! [`crate::TamgaError::RateLimited`] without retrying.
+//! `/actions/check-out`, `/actions/ping`, `/actions/ping-heartbeat` and
+//! `/actions/reset-heartbeat`. Creates are excluded on purpose. The rate
+//! limiter buckets per `(caller, route pattern)` and, with proxy headers
+//! untrusted, a whole fleet can share one bucket per route — so a throttled
+//! heartbeat is a routine event, not an edge case.
 
 /// Configuration for a [`Client`].
 ///
@@ -68,15 +74,22 @@ pub struct ClientConfig {
     /// up. Zero disables automatic retries entirely.
     ///
     /// Only requests that are safe to repeat are retried: every `GET`, plus
-    /// `POST` on the `validate`, `validate-key`, `check-in`, `check-out` and
-    /// `ping` actions. Creates are never retried — see the module doc
-    /// comment.
+    /// `POST` on the `validate`, `validate-key`, `check-in`, `check-out`,
+    /// `ping`, `ping-heartbeat` and `reset-heartbeat` actions. Creates are
+    /// never retried — see the module doc comment.
     pub max_retries: u32,
 }
 
 /// Default request timeout used unless overridden via
 /// [`ClientConfigBuilder::timeout`].
-const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+///
+/// Deliberately longer than the server's own 30s request timeout. Matching
+/// it exactly makes the two race: a genuinely slow request usually surfaces
+/// as a local `reqwest` timeout with nothing to correlate against, instead
+/// of the server's `504`, whose body is empty but which carries the
+/// `X-Request-Id` a support ticket actually needs. 45s lets the server's
+/// deadline win.
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Default number of retries for a rate-limited request.
 ///
@@ -85,6 +98,19 @@ const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// tight (5 req/s by default), and a heartbeat timer plus a retry loop reaches
 /// it easily — which is exactly the case this exists for.
 const DEFAULT_MAX_RETRIES: u32 = 3;
+
+/// The server's own maximum `limit` on the nested keyset list routes
+/// (`GET /licenses/{id}/entitlements`, `GET /machines/{id}/components`).
+/// Larger values are clamped to it server-side.
+pub const MAX_ENTITLEMENTS_PAGE_SIZE: u32 = 100;
+
+/// The `limit` the server applies when a nested list request omits one.
+///
+/// Named because it is a **silent** truncation: these routes emit no
+/// `meta.page` and no `links`, so a 25-row response with `limit` unset is
+/// indistinguishable from a licence or machine that genuinely has 25 rows.
+/// Always pass an explicit `limit`.
+pub const DEFAULT_SERVER_PAGE_SIZE: u32 = 25;
 
 impl ClientConfig {
     /// Starts building a [`ClientConfig`] with the two always-required
@@ -140,17 +166,27 @@ impl ClientConfigBuilder {
         self
     }
 
-    /// Overrides the default 30s request timeout.
+    /// Overrides the default 45s request timeout. Keep any override above
+    /// the server's own 30s deadline: below it the two race, and a slow
+    /// request surfaces as a local timeout with nothing to correlate
+    /// against instead of the server's `504`, which carries an
+    /// `X-Request-Id`.
     pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Sets the auth transport used to authenticate every request. Required
-    /// before [`Self::build`] — there is no auth-less default, since every
-    /// documented server endpoint expects credentials to be sent even where
-    /// enforcement isn't wired up yet (see the Tamga API protocol
-    /// specification → Known Server-Side Gaps).
+    /// before [`Self::build`] — there is no auth-less default, because there
+    /// is no unauthenticated endpoint: every route this client calls
+    /// enforces credentials and answers `401` without them.
+    ///
+    /// Choosing [`crate::transport::AuthTransport::License`] carries one
+    /// server-side precondition worth knowing before shipping: the licence's
+    /// policy must set `authentication_strategy` to `LICENSE` or `MIXED`.
+    /// The column defaults to `'TOKEN'`, under which a licence key is not an
+    /// accepted credential at all and every request is refused with
+    /// `401 LICENSE_NOT_ALLOWED` — see [`crate::error::LicenseAuthCode`].
     pub fn auth(mut self, auth: crate::transport::AuthTransport) -> Self {
         self.auth = Some(auth);
         self
@@ -240,9 +276,20 @@ impl Client {
     /// Is this request safe to repeat after a `429`?
     ///
     /// `GET` always is. Among the `POST`s only the licensing *actions* are —
-    /// they are effectively idempotent (validate, check in/out, ping a
-    /// heartbeat), and they are precisely the calls a client makes on a timer,
-    /// so they are the ones that hit the rate limit in the first place.
+    /// they are effectively idempotent (validate, check in/out, ping or reset
+    /// a heartbeat), and they are precisely the calls a client makes on a
+    /// timer, so they are the ones that hit the rate limit in the first place.
+    ///
+    /// `/actions/ping-heartbeat` and `/actions/reset-heartbeat` need their own
+    /// entries: neither ends with `/actions/ping` (that suffix is the
+    /// *process* ping route), so a suffix list without them silently drops
+    /// every throttled machine heartbeat. That is the worst failure of the
+    /// set — the rate limiter buckets per `(caller, route pattern)`, and with
+    /// proxy headers untrusted an entire fleet shares one bucket on this
+    /// route, so heartbeats are exactly what gets throttled. A dropped
+    /// heartbeat eventually culls the machine. Both are bare
+    /// `last_heartbeat_at` writes with no create semantics, so repeating them
+    /// is unconditionally safe.
     ///
     /// Creates are deliberately excluded. Retrying `POST /machines` after a
     /// timeout-shaped failure risks a second activation burning a second seat,
@@ -258,6 +305,8 @@ impl Client {
                 "/actions/check-in",
                 "/actions/check-out",
                 "/actions/ping",
+                "/actions/ping-heartbeat",
+                "/actions/reset-heartbeat",
             ]
             .iter()
             .any(|suffix| path.ends_with(suffix))
@@ -489,11 +538,20 @@ impl Client {
 
     /// `POST /licenses/{license_id}/actions/validate` — validates a license
     /// by ID, optionally constrained by `scope` (see
-    /// [`crate::models::validation::ScopeObject`] — only
-    /// `product`/`policy`/`user`/`environment` are enforced server-side
-    /// today). `skip_touch: true` suppresses the `last_validated_at`
+    /// [`crate::models::validation::ScopeObject`]: `product`, `policy`,
+    /// `user`, `environment`, `entitlements` and `fingerprint` are all
+    /// enforced server-side; `version` and `checksum` are refused and are
+    /// never sent). `skip_touch: true` suppresses the `last_validated_at`
     /// side-effect. `otp` sends `Tamga-OTP` if the bearer's account has 2FA
     /// enabled.
+    ///
+    /// Scoping on `fingerprint` is the anti-key-sharing check: passing the
+    /// local machine's fingerprint asserts the licence is being validated
+    /// from a machine that licence already knows about. Scoping on
+    /// `entitlements` is the only way to get an authoritative
+    /// entitlement answer for a licence holding more than
+    /// [`MAX_ENTITLEMENTS_PAGE_SIZE`] of them — see
+    /// [`Self::has_entitlement`].
     pub async fn validate_by_id(
         &self,
         license_id: uuid::Uuid,
@@ -525,6 +583,23 @@ impl Client {
     /// resource) — cheaper than [`Self::validate_by_id`] when the caller
     /// only needs the outcome, not the license's current attributes. `otp`
     /// sends `Tamga-OTP` if the bearer's account has 2FA enabled.
+    ///
+    /// This route **does** write `last_validated_at`, and there is no
+    /// `skip_touch` on it — but the server skips that write entirely
+    /// whenever the request carries an `Origin` header, and the two
+    /// responses are byte-identical, so a caller cannot tell which
+    /// happened. This SDK never sets `Origin` on any transport, so the
+    /// write normally lands; a proxy or middleware that adds one silently
+    /// turns it off. That matters more than it looks: a licence with no
+    /// machines and a null `last_validated_at` reports `INACTIVE`, and
+    /// `last_validated_at` is also the baseline the server's
+    /// check-in-overdue sweep measures from, so an always-`Origin` client
+    /// can leave a licence permanently un-activated and permanently
+    /// overdue. Check-in does not substitute — it writes a different
+    /// column.
+    ///
+    /// The only deliberately side-effect-free path is
+    /// [`Self::validate_by_id`] with `skip_touch: true`.
     pub async fn quick_validate(
         &self,
         license_id: uuid::Uuid,
@@ -572,16 +647,15 @@ impl Client {
         encrypt: bool,
         ttl: Option<u64>,
     ) -> Result<String, crate::TamgaError> {
-        let mut builder = self.request(
-            reqwest::Method::GET,
-            &format!("/licenses/{license_id}/actions/check-out"),
-            None,
-        );
+        let path = format!("/licenses/{license_id}/actions/check-out");
+        let mut builder = self.request(reqwest::Method::GET, &path, None);
         builder = builder.query(&[("encrypt", encrypt.to_string())]);
         if let Some(ttl) = ttl {
             builder = builder.query(&[("ttl", ttl.to_string())]);
         }
-        let response = builder.send().await?;
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -629,16 +703,15 @@ impl Client {
         if let Some(ttl) = ttl {
             crate::checkout::machine_file::check_ttl(ttl)?;
         }
-        let mut builder = self.request(
-            reqwest::Method::GET,
-            &format!("/machines/{machine_id}/actions/check-out"),
-            None,
-        );
+        let path = format!("/machines/{machine_id}/actions/check-out");
+        let mut builder = self.request(reqwest::Method::GET, &path, None);
         builder = builder.query(&[("encrypt", encrypt.to_string())]);
         if let Some(ttl) = ttl {
             builder = builder.query(&[("ttl", ttl.to_string())]);
         }
-        let response = builder.send().await?;
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -679,12 +752,22 @@ impl Client {
     /// fingerprint on the same license fails with
     /// [`crate::TamgaError::FingerprintTaken`].
     ///
-    /// **No machine/core/etc. limit is checked at creation time** — those
-    /// limits only surface later via [`Self::validate_by_id`]. The
-    /// recommended "activate machine" flow is create → validate → interpret
-    /// `TooManyMachines`/`TooManyCores`/etc., deleting the machine row on
-    /// that path if the desired UX is "reject over-limit activation" — see
-    /// [`Self::activate_machine`], which does exactly that.
+    /// **Creation may or may not enforce the policy's limits — the policy
+    /// decides.** The server runs the machine/core/memory/disk checks here,
+    /// but routes each one through the policy's overage strategy: under a
+    /// permissive strategy (`ALLOW_ACCESS`, `ALLOW_1_25X_OVERAGE`, …) the
+    /// machine is created and the limit surfaces only on the next
+    /// [`Self::validate_by_id`], while under a strict one creation itself
+    /// is refused with a `422` carrying a
+    /// [`crate::error::LimitExceededCode`] (`MACHINE_LIMIT_EXCEEDED`,
+    /// `CORE_LIMIT_EXCEEDED`, `MEMORY_LIMIT_EXCEEDED`,
+    /// `DISK_LIMIT_EXCEEDED`).
+    ///
+    /// A caller doing this by hand therefore has to handle both shapes of
+    /// the same outcome. [`Self::activate_machine`] does: it normalizes the
+    /// create-time `422` onto the equivalent
+    /// [`crate::models::validation::ValidationCode`] and keeps the
+    /// create → validate → delete-on-overage path for the permissive case.
     pub async fn create_machine(
         &self,
         license_id: uuid::Uuid,
@@ -716,18 +799,41 @@ impl Client {
 
     /// `create_machine` + [`Self::validate_by_id`] composed into the
     /// recommended "activate machine" flow (see [`Self::create_machine`]'s
-    /// doc comment for why creation alone doesn't enforce limits).
+    /// doc comment for why creation enforces limits under some policies and
+    /// not others).
     ///
-    /// If validation fails with an over-limit
-    /// [`crate::models::validation::ValidationCode`] (`TooManyMachines`,
-    /// `TooManyCores`, `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`)
-    /// and `auto_delete_on_overage` is `true`, the just-created machine is
-    /// deleted before returning the validation result — implementing
-    /// "reject over-limit activation" instead of leaving an orphaned
-    /// machine row behind. Deletion failures are not surfaced (the
-    /// validation result is what the caller asked for); a machine left
-    /// behind after a failed auto-delete is still visible to normal
-    /// machine-management calls for manual cleanup.
+    /// Over-limit activation has **two** shapes and this method flattens
+    /// both into one outcome — an `Ok` whose
+    /// [`crate::models::validation::ValidationMeta`] has `valid: false` and
+    /// the matching over-limit code:
+    ///
+    /// - *Permissive overage strategy.* Creation succeeds, validation comes
+    ///   back over-limit (`TooManyMachines`, `TooManyCores`,
+    ///   `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`). With
+    ///   `auto_delete_on_overage` the just-created machine is deleted
+    ///   before returning, implementing "reject over-limit activation"
+    ///   instead of leaving an orphaned row behind. Deletion failures are
+    ///   not surfaced (the validation result is what the caller asked for);
+    ///   a machine left behind after a failed auto-delete is still visible
+    ///   to normal machine-management calls for manual cleanup.
+    /// - *Strict overage strategy.* Creation itself is refused with a `422`
+    ///   [`crate::error::LimitExceededCode`], which short-circuits the flow
+    ///   before validation ever runs. That is normalized onto the
+    ///   equivalent validation code
+    ///   ([`crate::error::LimitExceededCode::as_validation_code`]) and
+    ///   returned in the same shape, so one caller-side branch covers both
+    ///   policies. **No delete is issued** on this path — no row was
+    ///   created, and deleting the machine that already occupies the seat
+    ///   would be exactly wrong.
+    ///
+    /// On that second path the licence resource is still fetched (via a
+    /// `skip_touch` validate, so a refused activation records no
+    /// `last_validated_at`) to fill out the result; only the returned
+    /// `meta` is replaced. If that fetch also fails, the original create
+    /// error propagates rather than being masked.
+    ///
+    /// Any other creation failure — `409 FINGERPRINT_TAKEN`, `401`, `403` —
+    /// propagates unchanged.
     pub async fn activate_machine(
         &self,
         license_id: uuid::Uuid,
@@ -736,7 +842,18 @@ impl Client {
         scope: Option<crate::models::validation::ScopeObject>,
         auto_delete_on_overage: bool,
     ) -> Result<crate::models::validation::ValidationResult, crate::TamgaError> {
-        let machine = self.create_machine(license_id, fingerprint, opts).await?;
+        let machine = match self.create_machine(license_id, fingerprint, opts).await {
+            Ok(machine) => machine,
+            Err(err) => match err.limit_exceeded() {
+                Some(limit) => {
+                    return self
+                        .over_limit_result_without_machine(license_id, scope, limit, err)
+                        .await
+                }
+                None => return Err(err),
+            },
+        };
+
         let result = self.validate_by_id(license_id, scope, false, None).await;
 
         if auto_delete_on_overage {
@@ -750,6 +867,45 @@ impl Client {
         }
 
         result
+    }
+
+    /// Builds the over-limit [`crate::models::validation::ValidationResult`]
+    /// for a machine the server refused to create.
+    ///
+    /// The licence resource comes from a `skip_touch` validate — the flow
+    /// needs a `LicenseResource` to return and this is the only read that
+    /// yields one without recording a successful validation for an
+    /// activation that did not happen. Its `meta` is discarded: it would
+    /// describe the licence *without* the refused machine, which is the one
+    /// question the caller did not ask. `create_err` is returned untouched
+    /// if the licence cannot be read at all, so a second failure never
+    /// masks the first.
+    async fn over_limit_result_without_machine(
+        &self,
+        license_id: uuid::Uuid,
+        scope: Option<crate::models::validation::ScopeObject>,
+        limit: crate::error::LimitExceededCode,
+        create_err: crate::TamgaError,
+    ) -> Result<crate::models::validation::ValidationResult, crate::TamgaError> {
+        let detail = create_err
+            .json_api_error()
+            .map(|err| err.detail.clone())
+            .unwrap_or_default();
+
+        let probe = match self.validate_by_id(license_id, scope, true, None).await {
+            Ok(probe) => probe,
+            Err(_) => return Err(create_err),
+        };
+
+        Ok(crate::models::validation::ValidationResult {
+            license: probe.license,
+            meta: crate::models::validation::ValidationMeta {
+                ts: probe.meta.ts,
+                valid: false,
+                detail,
+                code: limit.as_validation_code(),
+            },
+        })
     }
 
     /// `POST /machines/{machine_id}/actions/ping-heartbeat` — no body, sets
@@ -770,6 +926,17 @@ impl Client {
     /// `POST /machines/{machine_id}/actions/reset-heartbeat` — no body,
     /// fully rewinds heartbeat state to
     /// [`crate::models::machine::HeartbeatStatus::NotStarted`].
+    ///
+    /// ⚠️ **Never callable with a licence key.** Unlike
+    /// [`Self::ping_heartbeat`], which is permission-gated only, this route
+    /// is role-gated: admin, developer, product-token and
+    /// environment-token callers pass; a `LicenseToken` — what
+    /// [`crate::transport::AuthTransport::License`] produces — is refused
+    /// with `403` every single time, regardless of the permissions on the
+    /// key. Worth stating plainly because this is the server's only way to
+    /// unstick a machine whose heartbeat job is wedged: an embedded client
+    /// authenticating by licence key has no recovery here and must escalate
+    /// to a back-office credential.
     pub async fn reset_heartbeat(
         &self,
         machine_id: uuid::Uuid,
@@ -806,6 +973,16 @@ impl Client {
     /// string — pass the proof, plus the exact `account_id`/`machine_id`/
     /// `fingerprint`/`dataset` tuple used here, to
     /// [`crate::proof::verify_offline_proof`] to verify it fully offline.
+    ///
+    /// ⚠️ **Never callable with a licence key**, same as
+    /// [`Self::reset_heartbeat`]: this route is role-gated and a
+    /// `LicenseToken` is not among the accepted roles, so it answers `403`
+    /// even though the licence-key role does hold the
+    /// `machine.proofs.generate` permission. Generating a proof requires a
+    /// back-office credential; *verifying* one
+    /// ([`crate::proof::verify_offline_proof`]) needs no credential and no
+    /// network at all, which is the half an embedded client actually
+    /// wants.
     pub async fn generate_offline_proof(
         &self,
         machine_id: uuid::Uuid,
@@ -858,7 +1035,15 @@ impl Client {
     /// `GET /machines/{machine_id}/components` — keyset-paginated
     /// (`limit`, `page[after]`). The response carries no cursor
     /// metadata/links — pass the last returned component's `id` as `after`
-    /// to fetch the next page.
+    /// to fetch the next page. Unlike the entitlements listing, the cursor
+    /// on this route is real and does advance.
+    ///
+    /// Pass `limit` explicitly. Omitting it does not mean "everything": the
+    /// server defaults to [`DEFAULT_SERVER_PAGE_SIZE`] and clamps to
+    /// [`MAX_ENTITLEMENTS_PAGE_SIZE`], and with no page metadata in the
+    /// response a caller that did not choose the limit cannot tell a full
+    /// page from a final one — which is also what makes "is this page
+    /// short?" the only usable end-of-listing signal.
     pub async fn list_components(
         &self,
         machine_id: uuid::Uuid,
@@ -870,18 +1055,17 @@ impl Client {
             data: Vec<crate::models::machine::ComponentResource>,
         }
 
-        let mut builder = self.request(
-            reqwest::Method::GET,
-            &format!("/machines/{machine_id}/components"),
-            None,
-        );
+        let path = format!("/machines/{machine_id}/components");
+        let mut builder = self.request(reqwest::Method::GET, &path, None);
         if let Some(limit) = limit {
             builder = builder.query(&[("limit", limit.to_string())]);
         }
         if let Some(after) = after {
             builder = builder.query(&[("page[after]", after.to_string())]);
         }
-        let response = builder.send().await?;
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -930,11 +1114,33 @@ impl Client {
         .await
     }
 
-    /// `GET /licenses/{license_id}/entitlements` — keyset-paginated
-    /// (`limit`, `page[after]`). Despite the URL nesting, returns full
+    /// `GET /licenses/{license_id}/entitlements` — the licence's effective
+    /// entitlements, direct attachments and policy-inherited rows unioned
+    /// together. Despite the URL nesting, returns full
     /// [`crate::models::entitlement::EntitlementResource`]s, not
-    /// lightweight junction records. No auth/permission check is applied
-    /// beyond the license existing.
+    /// lightweight junction records.
+    ///
+    /// ⚠️ **This route cannot be paginated.** `page[after]` is accepted for
+    /// wire compatibility and then ignored: the listing is a union across
+    /// two tables, so a single keyset cursor no longer describes it and the
+    /// server applies no cursor predicate at all. Passing `after` therefore
+    /// re-fetches the same first page — never build a "loop until short
+    /// page" over this method, and never treat the last row's id as a
+    /// cursor here. (`GET /machines/{id}/components`, which
+    /// [`Self::list_components`] calls, is unaffected: its cursor is real.)
+    ///
+    /// `limit` bounds the response instead, and is the only thing that
+    /// does. Omitting it does **not** mean "everything" — the server
+    /// silently defaults to **25** rows and clamps to a maximum of
+    /// [`MAX_ENTITLEMENTS_PAGE_SIZE`], with no `meta`/`links` to signal the
+    /// truncation. Pass an explicit limit. A licence with more than 100
+    /// effective entitlements cannot be fully enumerated through this
+    /// endpoint at all, so a negative answer derived from it is
+    /// authoritative only below that ceiling — see
+    /// [`Self::has_entitlement`].
+    ///
+    /// This method drops the licence-scoped `inherited` attribute; use
+    /// [`Self::list_license_entitlements`] to keep it.
     pub async fn list_entitlements(
         &self,
         license_id: uuid::Uuid,
@@ -946,18 +1152,58 @@ impl Client {
             data: Vec<crate::models::entitlement::EntitlementResource>,
         }
 
-        let mut builder = self.request(
-            reqwest::Method::GET,
-            &format!("/licenses/{license_id}/entitlements"),
-            None,
-        );
+        let path = format!("/licenses/{license_id}/entitlements");
+        let mut builder = self.request(reqwest::Method::GET, &path, None);
         if let Some(limit) = limit {
             builder = builder.query(&[("limit", limit.to_string())]);
         }
         if let Some(after) = after {
             builder = builder.query(&[("page[after]", after.to_string())]);
         }
-        let response = builder.send().await?;
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        let envelope: Envelope = response.json().await?;
+        Ok(envelope.data)
+    }
+
+    /// [`Self::list_entitlements`], keeping the licence-scoped `inherited`
+    /// flag each row carries.
+    ///
+    /// Same endpoint, same request, same pagination caveats — including that
+    /// `page[after]` is inert here, which is why this method takes no
+    /// cursor at all. It exists because
+    /// [`crate::models::entitlement::EntitlementResource`] is shared with
+    /// the account-, policy- and release-scoped routes, where the server
+    /// emits no `inherited` attribute, so the flag has nowhere to live on
+    /// that type.
+    ///
+    /// Reach for this whenever the caller intends to *act* on a row rather
+    /// than just read its `code`: an inherited entitlement cannot be
+    /// detached, cannot be re-attached, and 404s on
+    /// [`Self::get_entitlement`]. See
+    /// [`crate::models::entitlement::LicenseEntitlementAttributes::inherited`].
+    pub async fn list_license_entitlements(
+        &self,
+        license_id: uuid::Uuid,
+        limit: Option<u32>,
+    ) -> Result<Vec<crate::models::entitlement::LicenseEntitlement>, crate::TamgaError> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            data: Vec<crate::models::entitlement::LicenseEntitlement>,
+        }
+
+        let path = format!("/licenses/{license_id}/entitlements");
+        let mut builder = self.request(reqwest::Method::GET, &path, None);
+        if let Some(limit) = limit {
+            builder = builder.query(&[("limit", limit.to_string())]);
+        }
+        let response = self
+            .send_with_retry(builder, &reqwest::Method::GET, &path)
+            .await?;
         if !response.status().is_success() {
             return Err(Self::api_error(response).await);
         }
@@ -966,6 +1212,12 @@ impl Client {
     }
 
     /// `GET /licenses/{license_id}/entitlements/{entitlement_id}`.
+    ///
+    /// ⚠️ Resolves **direct attachments only**. An entitlement the licence
+    /// holds through its policy appears in
+    /// [`Self::list_license_entitlements`] with `inherited: true` but 404s
+    /// here — the item route joins only the direct-attachment table. Do not
+    /// build a list-then-get-each loop over this resource.
     pub async fn get_entitlement(
         &self,
         license_id: uuid::Uuid,
@@ -981,13 +1233,23 @@ impl Client {
     }
 
     /// Convenience helper: fetches this license's entitlements (a single
-    /// page, up to `limit`) and checks whether any has the given `code`.
+    /// request, up to `limit`) and checks whether any has the given `code`.
     ///
     /// Matches on `code` (the stable, developer-facing identifier) —
-    /// **never** on `name` (just a display label). Fetches at most one
-    /// page (`limit`, default 100 — the server's own max page size); for
-    /// licenses with more entitlements than fit on one page, paginate via
-    /// [`Self::list_entitlements`] directly instead.
+    /// **never** on `name` (just a display label). Direct and
+    /// policy-inherited entitlements both count, exactly as they do for
+    /// [`crate::models::validation::ScopeObject::entitlements`].
+    ///
+    /// One request is all there is: `limit` defaults to
+    /// [`MAX_ENTITLEMENTS_PAGE_SIZE`], the server's ceiling, and this route
+    /// cannot be paginated past it (see [`Self::list_entitlements`]). A
+    /// `true` answer is always authoritative. A **`false`** answer is
+    /// authoritative only for a licence holding at most
+    /// [`MAX_ENTITLEMENTS_PAGE_SIZE`] effective entitlements; beyond that
+    /// the endpoint cannot enumerate them all and a code past the ceiling
+    /// is indistinguishable from an absent one. Scope the validate call
+    /// instead ([`crate::models::validation::ScopeObject::entitlements`]),
+    /// which the server evaluates against the full set.
     pub async fn has_entitlement(
         &self,
         license_id: uuid::Uuid,
@@ -995,7 +1257,11 @@ impl Client {
         limit: Option<u32>,
     ) -> Result<bool, crate::TamgaError> {
         let entitlements = self
-            .list_entitlements(license_id, Some(limit.unwrap_or(100)), None)
+            .list_entitlements(
+                license_id,
+                Some(limit.unwrap_or(MAX_ENTITLEMENTS_PAGE_SIZE)),
+                None,
+            )
             .await?;
         Ok(entitlements.iter().any(|e| e.attributes.code == code))
     }
@@ -1016,9 +1282,14 @@ pub struct CreateMachineOptions {
     pub platform: Option<String>,
     /// CPU core count to record.
     pub cores: Option<i32>,
-    /// Memory in bytes to record.
+    /// Memory in **megabytes** to record — not bytes. This value feeds the
+    /// licence's `machines_memory_count` total and the policy's
+    /// `max_memory` check, so reporting bytes here inflates the total by
+    /// ~10^6 and trips `MEMORY_LIMIT_EXCEEDED` on the next activation. See
+    /// [`crate::models::machine::MachineAttributes::memory`].
     pub memory: Option<i64>,
-    /// Disk in bytes to record.
+    /// Disk in **megabytes** to record — same units and same failure mode
+    /// as `memory`.
     pub disk: Option<i64>,
     /// Arbitrary caller-set metadata; defaults to `{}` if `None`.
     pub metadata: Option<serde_json::Value>,
@@ -1062,11 +1333,16 @@ mod tests {
     }
 
     #[test]
-    fn builder_defaults_timeout_to_30_seconds() {
+    fn builder_defaults_timeout_above_the_servers_own_deadline() {
         let config = ClientConfig::builder("acc-123", "api.tamga.sh")
             .auth(AuthTransport::License("lic-abc".to_string()))
             .build();
-        assert_eq!(config.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(config.timeout, std::time::Duration::from_secs(45));
+        assert!(
+            config.timeout > std::time::Duration::from_secs(30),
+            "must outlast the server's own 30s timeout so its 504 (which \
+             carries X-Request-Id) wins the race, not a local timeout"
+        );
     }
 
     #[test]

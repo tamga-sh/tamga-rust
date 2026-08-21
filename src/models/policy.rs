@@ -25,10 +25,17 @@
 //!   branches on literal string match; treat any unrecognized value as
 //!   "deny/default"):
 //!   - `expiration_strategy`: `"RESTRICT_ACCESS"` (default),
-//!     `"MAINTAIN_ACCESS"`, `"ALLOW_ACCESS"`.
+//!     `"MAINTAIN_ACCESS"`, `"ALLOW_ACCESS"`, `"REVOKE_ACCESS"`. The last
+//!     one is the only value under which an expired licence stops
+//!     authenticating at all (`401 LICENSE_EXPIRED`); under the other three
+//!     it authenticates and the expiry surfaces as a validation outcome.
 //!   - `renewal_basis`: `"FROM_EXPIRY"` (default), `"FROM_NOW"`.
 //!   - `authentication_strategy`: `"TOKEN"` (default), `"LICENSE"`,
-//!     `"MIXED"`.
+//!     `"MIXED"`, `"NONE"`. **Licence-key auth is off by default**: only
+//!     `LICENSE` and `MIXED` accept a licence key as a credential.
+//!     `"NONE"` behaves like `"TOKEN"` at this gate — both refuse with
+//!     `401 LICENSE_NOT_ALLOWED`, which is a provisioning precondition, not
+//!     a retryable error (see [`crate::error::LicenseAuthCode`]).
 //! - ⚠️ Policy-create defaults reference **non-existent** enum variants:
 //!   new policies default `overage_strategy` to `"DENY_ACCESS"` (not a real
 //!   `OverageStrategy` variant — silently behaves as `NO_OVERAGE`) and
@@ -420,6 +427,7 @@ free_text_policy_field!(ExpirationStrategy {
     RESTRICT_ACCESS = "RESTRICT_ACCESS",
     MAINTAIN_ACCESS = "MAINTAIN_ACCESS",
     ALLOW_ACCESS = "ALLOW_ACCESS",
+    REVOKE_ACCESS = "REVOKE_ACCESS",
 });
 
 free_text_policy_field!(RenewalBasis {
@@ -431,6 +439,7 @@ free_text_policy_field!(AuthenticationStrategy {
     TOKEN = "TOKEN",
     LICENSE = "LICENSE",
     MIXED = "MIXED",
+    NONE = "NONE",
 });
 
 /// The `policies` JSON:API resource: `{ id, type, attributes }`. Field set
@@ -517,14 +526,18 @@ pub struct PolicyAttributes {
     /// per-account (server-side semantics not yet SDK-relevant beyond the
     /// `FINGERPRINT_TAKEN` conflict this SDK already models).
     pub machine_uniqueness_strategy: String,
-    /// See [`ExpirationStrategy`]. Default `"RESTRICT_ACCESS"`.
+    /// See [`ExpirationStrategy`]. Default `"RESTRICT_ACCESS"`. Only
+    /// `"REVOKE_ACCESS"` stops an expired licence from authenticating at
+    /// all.
     pub expiration_strategy: ExpirationStrategy,
     /// What a license's expiry is computed relative to (server-side
     /// semantics not yet SDK-relevant).
     pub expiration_basis: String,
     /// See [`RenewalBasis`]. Default `"FROM_EXPIRY"`.
     pub renewal_basis: RenewalBasis,
-    /// See [`AuthenticationStrategy`]. Default `"TOKEN"`.
+    /// See [`AuthenticationStrategy`]. Default `"TOKEN"`, under which
+    /// licence-key auth is **refused** — only `"LICENSE"` and `"MIXED"`
+    /// accept a licence key. `"NONE"` refuses it too.
     pub authentication_strategy: AuthenticationStrategy,
     /// ⚠️ Freshly-created policies default this to the **non-existent**
     /// string `"DENY_ACCESS"` — same rationale as
@@ -619,10 +632,12 @@ mod policy_tests {
         assert_eq!(ExpirationStrategy::RESTRICT_ACCESS, "RESTRICT_ACCESS");
         assert_eq!(ExpirationStrategy::MAINTAIN_ACCESS, "MAINTAIN_ACCESS");
         assert_eq!(ExpirationStrategy::ALLOW_ACCESS, "ALLOW_ACCESS");
+        assert_eq!(ExpirationStrategy::REVOKE_ACCESS, "REVOKE_ACCESS");
         assert_eq!(RenewalBasis::FROM_EXPIRY, "FROM_EXPIRY");
         assert_eq!(RenewalBasis::FROM_NOW, "FROM_NOW");
         assert_eq!(AuthenticationStrategy::TOKEN, "TOKEN");
         assert_eq!(AuthenticationStrategy::LICENSE, "LICENSE");
         assert_eq!(AuthenticationStrategy::MIXED, "MIXED");
+        assert_eq!(AuthenticationStrategy::NONE, "NONE");
     }
 }

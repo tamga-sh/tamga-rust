@@ -4,37 +4,50 @@
 //!
 //! - `ScopeObject`: 8 optional fields — `product`, `policy`, `user`,
 //!   `environment` (`Uuid`), `entitlements` (`Vec<String>`), `fingerprint`,
-//!   `version`, `checksum` (`String`). Only `product`/`policy`/`user`/
-//!   `environment` are enforced server-side today; the rest are parsed but
-//!   silently ignored — keep them in the request builder for
-//!   forward-compatibility, but do not advertise them as functioning
-//!   constraints yet. Must serialize with `skip_serializing_if =
-//!   "Option::is_none"` so unset fields are omitted from the request body.
+//!   `version`, `checksum` (`String`). Six are enforced server-side:
+//!   `product`, `policy`, `user`, `environment`, `entitlements` and
+//!   `fingerprint`. The remaining two, `version` and `checksum`, are
+//!   **refused**: setting either fails the entire validate call with
+//!   `422 SCOPE_NOT_SUPPORTED` before any check runs, so the caller never
+//!   sees a `meta.valid` at all. They are therefore never serialized — see
+//!   `ScopeObject`'s own doc comment. Enforced fields serialize with
+//!   `skip_serializing_if = "Option::is_none"` so unset ones are omitted
+//!   from the request body.
 //! - `ValidationMeta`: `{ ts, valid, detail, code }`.
 //! - `ValidationCode`: all **24** variants, with a `#[serde(other)]
 //!   Unknown(String)` fallback for lenient deserialization of any future
 //!   server-side addition.
-//!   - ✅ Reachable today (14): `VALID`, `SUSPENDED`, `EXPIRED`, `OVERDUE`,
+//!   - ✅ Reachable today (16): `VALID`, `SUSPENDED`, `EXPIRED`, `OVERDUE`,
 //!     `PRODUCT_SCOPE_MISMATCH`, `POLICY_SCOPE_MISMATCH`,
 //!     `USER_SCOPE_MISMATCH`, `ENVIRONMENT_SCOPE_MISMATCH`,
+//!     `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`,
 //!     `TOO_MANY_MACHINES`, `TOO_MANY_CORES`, `TOO_MUCH_MEMORY`,
 //!     `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, `TOO_MANY_USES`.
 //!   - ⛔ `NOT_FOUND` — never emitted; the handler returns HTTP 404 directly
 //!     instead of this code.
-//!   - ⛔ Declared but never wired into any validation path (9): `BANNED`,
-//!     `ENTITLEMENTS_MISSING`, `TOO_MANY_USERS`, `HEARTBEAT_DEAD`,
-//!     `HEARTBEAT_NOT_STARTED`, `FINGERPRINT_SCOPE_MISMATCH`,
+//!   - ⛔ Declared but never wired into any validation path (7): `BANNED`,
+//!     `TOO_MANY_USERS`, `HEARTBEAT_DEAD`, `HEARTBEAT_NOT_STARTED`,
 //!     `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`,
-//!     `VERSION_SCOPE_MISMATCH`.
+//!     `VERSION_SCOPE_MISMATCH`. The last two are structurally
+//!     unreachable — the scope fields that would produce them are rejected
+//!     with `422 SCOPE_NOT_SUPPORTED` first.
 
 /// Scope constraints for `validate_by_id`, sent as `meta.scope` in the
 /// request body. Every field is optional — `None` means "no constraint,
 /// skip this check" (mirrors the server's `ValidationScope`).
 ///
-/// Only `product`/`policy`/`user`/`environment` are enforced server-side
-/// today; `entitlements`/`fingerprint`/`version`/`checksum` are parsed and
-/// silently ignored. Kept here for forward-compatibility — do not advertise
-/// them as functioning constraints.
+/// Six of the eight are enforced server-side: `product`, `policy`, `user`,
+/// `environment`, `entitlements` and `fingerprint`.
+///
+/// `version` and `checksum` are **refused**, not ignored. The server has
+/// nothing to compare either against, and rather than let a scope silently
+/// pass (which then gets relied on) it fails the whole call with
+/// `422 SCOPE_NOT_SUPPORTED` before running any validation — so a caller
+/// that sets one gets no `meta.valid` back at all. Both fields are
+/// consequently **never serialized into the request body**: they are kept
+/// as deserializable members so existing code that reads or assigns them
+/// still compiles, but assigning one now degrades to a working, unscoped
+/// validate instead of a hard failure. They are deprecated; drop them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScopeObject {
     /// Enforced. Must match the license's product.
@@ -49,17 +62,33 @@ pub struct ScopeObject {
     /// Enforced. Must match the license's environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<uuid::Uuid>,
-    /// Not enforced server-side yet — parsed and ignored.
+    /// Enforced. Entitlement **codes** (the stable developer-facing
+    /// identifier), not the entitlement UUIDs that attach/detach bodies
+    /// take. Compared case-insensitively and de-duplicated server-side,
+    /// and satisfied by directly-attached *and* policy-inherited
+    /// entitlements alike. An empty vec asserts nothing. A license missing
+    /// any one of them validates as
+    /// [`ValidationCode::EntitlementsMissing`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entitlements: Option<Vec<String>>,
-    /// Not enforced server-side yet — parsed and ignored.
+    /// Enforced. Matches when **any** machine on this license carries this
+    /// fingerprint, regardless of that machine's heartbeat status. This is
+    /// the anti-key-sharing check: pass the activating machine's own
+    /// fingerprint to assert the license is being validated from a machine
+    /// it knows about. A mismatch validates as
+    /// [`ValidationCode::FingerprintScopeMismatch`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
-    /// Not enforced server-side yet — parsed and ignored.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// **Deprecated and never sent.** Setting this used to be a silent
+    /// no-op; the server now answers `422 SCOPE_NOT_SUPPORTED` and fails
+    /// the whole validate call, so this SDK omits the field from the
+    /// request body entirely. See the struct's doc comment.
+    #[serde(skip_serializing)]
     pub version: Option<String>,
-    /// Not enforced server-side yet — parsed and ignored.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// **Deprecated and never sent.** Same as `version` — the server
+    /// answers `422 SCOPE_NOT_SUPPORTED`, so this SDK omits the field. See
+    /// the struct's doc comment.
+    #[serde(skip_serializing)]
     pub checksum: Option<String>,
 }
 
@@ -97,16 +126,24 @@ pub struct ValidationMeta {
 /// `Unknown(String)` rather than failing, so a future server-side addition
 /// doesn't hard-break this SDK.
 ///
-/// - ✅ Reachable today (14): `Valid`, `Suspended`, `Expired`, `Overdue`,
+/// - ✅ Reachable today (16): `Valid`, `Suspended`, `Expired`, `Overdue`,
 ///   `ProductScopeMismatch`, `PolicyScopeMismatch`, `UserScopeMismatch`,
-///   `EnvironmentScopeMismatch`, `TooManyMachines`, `TooManyCores`,
+///   `EnvironmentScopeMismatch`, `FingerprintScopeMismatch`,
+///   `EntitlementsMissing`, `TooManyMachines`, `TooManyCores`,
 ///   `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`, `TooManyUses`.
 /// - ⛔ `NotFound` — never emitted; the handler returns HTTP 404 directly.
-/// - ⛔ Declared but never wired into any validation path (9): `Banned`,
-///   `EntitlementsMissing`, `TooManyUsers`, `HeartbeatDead`,
-///   `HeartbeatNotStarted`, `FingerprintScopeMismatch`,
+/// - ⛔ Declared but never wired into any validation path (7): `Banned`,
+///   `TooManyUsers`, `HeartbeatDead`, `HeartbeatNotStarted`,
 ///   `ComponentsScopeMismatch`, `ChecksumScopeMismatch`,
 ///   `VersionScopeMismatch`.
+///
+/// The five over-limit codes (`TooManyMachines`, `TooManyCores`,
+/// `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`) have create-time
+/// twins: under a strict overage strategy the server refuses registration
+/// with a `422` instead, which this SDK classifies as a
+/// [`crate::error::LimitExceededCode`] and can normalize back onto the
+/// matching variant here via
+/// [`crate::error::LimitExceededCode::as_validation_code`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationCode {
     /// ✅ All checks passed.
@@ -121,9 +158,12 @@ pub enum ValidationCode {
     Expired,
     /// ✅ Check-in required and the window has elapsed.
     Overdue,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ✅ `scope.entitlements` set and the license (counting both directly
+    /// attached and policy-inherited rows) does not hold every listed code.
     EntitlementsMissing,
     /// ✅ Machine count over `policy.max_machines` (per overage strategy).
+    /// A strict strategy refuses the machine at creation time instead —
+    /// see [`crate::error::LimitExceededCode::MachineLimitExceeded`].
     TooManyMachines,
     /// ✅ Core count over `policy.max_cores`.
     TooManyCores,
@@ -145,13 +185,16 @@ pub enum ValidationCode {
     PolicyScopeMismatch,
     /// ✅ `scope.user` set and mismatched.
     UserScopeMismatch,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ✅ `scope.fingerprint` set and no machine on this license carries
+    /// it.
     FingerprintScopeMismatch,
     /// ⛔ Declared, not wired into any validation path yet.
     ComponentsScopeMismatch,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ⛔ Structurally unreachable — `scope.checksum` is refused with
+    /// `422 SCOPE_NOT_SUPPORTED` before validation runs.
     ChecksumScopeMismatch,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ⛔ Structurally unreachable — `scope.version` is refused with
+    /// `422 SCOPE_NOT_SUPPORTED` before validation runs.
     VersionScopeMismatch,
     /// ✅ `scope.environment` set and mismatched.
     EnvironmentScopeMismatch,
@@ -279,6 +322,45 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert_eq!(obj.len(), 1, "only `product` was set: {obj:?}");
         assert!(obj.contains_key("product"));
+    }
+
+    #[test]
+    fn scope_object_never_serializes_the_two_refused_fields() {
+        // Setting either used to be a harmless no-op. It now fails the
+        // whole validate call with 422 SCOPE_NOT_SUPPORTED, so a caller
+        // that still sets one must degrade to an unscoped validate rather
+        // than to no validate at all.
+        let scope = ScopeObject {
+            product: Some(uuid::Uuid::nil()),
+            version: Some("1.2.3".to_string()),
+            checksum: Some("deadbeef".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&scope).unwrap();
+        assert_eq!(value, serde_json::json!({ "product": uuid::Uuid::nil() }));
+    }
+
+    #[test]
+    fn scope_object_still_deserializes_the_two_refused_fields() {
+        // Skipped on the way out, not on the way in — round-tripping a
+        // stored scope must not silently drop what the caller wrote.
+        let scope: ScopeObject =
+            serde_json::from_value(serde_json::json!({ "version": "1.2.3" })).unwrap();
+        assert_eq!(scope.version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn scope_object_serializes_the_enforced_entitlements_and_fingerprint() {
+        let scope = ScopeObject {
+            entitlements: Some(vec!["pro".to_string()]),
+            fingerprint: Some("fp-abc123".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&scope).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "entitlements": ["pro"], "fingerprint": "fp-abc123" })
+        );
     }
 
     #[test]

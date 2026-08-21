@@ -221,3 +221,221 @@ async fn activate_machine_deletes_on_overage_when_requested() {
         tamga::models::validation::ValidationCode::TooManyMachines
     );
 }
+
+fn license_resource_json(license_id: uuid::Uuid, machines_count: u32) -> serde_json::Value {
+    serde_json::json!({
+        "type": "licenses",
+        "id": license_id.to_string(),
+        "attributes": {
+            "name": null, "key": "lic-abc123", "status": "ACTIVE", "expiry": null,
+            "suspended": false, "protected": false, "uses": 0, "scheme": null,
+            "encrypted": false, "strict": false, "floating": false,
+            "max_machines": 1, "max_uses": null, "max_users": null,
+            "last_validated_at": null, "last_check_in_at": null, "last_check_out_at": null,
+            "machines_count": machines_count, "metadata": {},
+            "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+        }
+    })
+}
+
+fn validation_error_body(code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "errors": [{
+            "id": "01926b3e-0000-7000-8000-000000000000",
+            // JSON:API sends `status` as a string, not a number.
+            "status": "422",
+            "code": code,
+            "title": "Unprocessable Entity",
+            "detail": "the license has reached its machine limit",
+            "source": { "pointer": "/data/relationships/license" },
+        }]
+    })
+}
+
+#[tokio::test]
+async fn activate_machine_normalizes_a_create_time_limit_refusal_without_deleting() {
+    // Strict overage strategy: the server refuses `POST /machines` outright,
+    // so the create -> validate -> rollback path never starts. The seat that
+    // is already taken belongs to some other machine — issuing a DELETE here
+    // would evict an innocent activation, so the mock server mounts no
+    // DELETE route at all and would 404 if one were sent.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/machines"))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .set_body_json(validation_error_body("MACHINE_LIMIT_EXCEEDED")),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // The licence resource still has to come from somewhere. `skip_touch` is
+    // true: no activation happened, so nothing should be recorded as a
+    // successful validation.
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/actions/validate"
+        )))
+        .and(body_json(serde_json::json!({
+            "meta": { "skip_touch": true }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": license_resource_json(license_id, 1),
+            "meta": {
+                "ts": "2026-01-01T00:00:00Z", "valid": true,
+                "detail": "is valid", "code": "VALID",
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let result = client
+        .activate_machine(
+            license_id,
+            "fp-abc123",
+            CreateMachineOptions::default(),
+            None,
+            true,
+        )
+        .await
+        .expect("a create-time limit refusal is an over-limit outcome, not a transport failure");
+
+    // Same shape the validate-time overage produces, so one caller branch
+    // covers both policies — even though the probe validate itself said VALID
+    // (it describes the licence *without* the refused machine).
+    assert!(!result.meta.valid);
+    assert_eq!(
+        result.meta.code,
+        tamga::models::validation::ValidationCode::TooManyMachines
+    );
+    assert_eq!(
+        result.meta.detail,
+        "the license has reached its machine limit"
+    );
+    assert_eq!(result.license.id, license_id);
+
+    // No DELETE was issued: every mounted expectation is verified on drop,
+    // and an unmatched DELETE would have been recorded here.
+    let deletes = mock_server
+        .received_requests()
+        .await
+        .expect("wiremock records requests")
+        .into_iter()
+        .filter(|req| req.method == wiremock::http::Method::DELETE)
+        .count();
+    assert_eq!(deletes, 0, "nothing was created, so nothing may be deleted");
+}
+
+#[tokio::test]
+async fn activate_machine_still_rolls_back_when_overage_is_only_reported_at_validate() {
+    // Permissive overage strategy (ALLOW_ACCESS / ALLOW_1_25X_OVERAGE ...):
+    // the server's create-time limit check runs through it and lets the
+    // machine in, so the limit surfaces only at validate. The rollback path
+    // must still run.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let machine_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/machines"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "data": machine_resource_json(machine_id, "NOT_STARTED")
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // skip_touch is false here: this is a real activation attempt.
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/actions/validate"
+        )))
+        .and(body_json(serde_json::json!({
+            "meta": { "skip_touch": false }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": license_resource_json(license_id, 2),
+            "meta": {
+                "ts": "2026-01-01T00:00:00Z", "valid": false,
+                "detail": "has too many machines", "code": "TOO_MANY_MACHINES",
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("DELETE"))
+        .and(path(format!("/v1/accounts/acc-123/machines/{machine_id}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let result = client
+        .activate_machine(
+            license_id,
+            "fp-abc123",
+            CreateMachineOptions::default(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.meta.valid);
+    assert_eq!(
+        result.meta.code,
+        tamga::models::validation::ValidationCode::TooManyMachines
+    );
+
+    // `.expect(1)` on the DELETE mock is the assertion: wiremock verifies
+    // every expectation when the server drops, so the rollback is proven to
+    // have run rather than merely tolerated.
+    let deletes = mock_server
+        .received_requests()
+        .await
+        .expect("wiremock records requests")
+        .into_iter()
+        .filter(|req| req.method == wiremock::http::Method::DELETE)
+        .count();
+    assert_eq!(deletes, 1, "the just-created machine must be rolled back");
+}
+
+#[tokio::test]
+async fn activate_machine_propagates_a_non_limit_create_failure_unchanged() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/machines"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": "409",
+                "code": "FINGERPRINT_TAKEN",
+                "title": "Conflict",
+                "detail": "a machine with this fingerprint already exists on this license",
+                "source": null,
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let result = client
+        .activate_machine(
+            license_id,
+            "fp-abc123",
+            CreateMachineOptions::default(),
+            None,
+            true,
+        )
+        .await;
+    assert!(matches!(result, Err(TamgaError::FingerprintTaken(_))));
+}
