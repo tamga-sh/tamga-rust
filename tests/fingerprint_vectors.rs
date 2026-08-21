@@ -48,6 +48,18 @@ struct Rejected {
     reason: String,
 }
 
+/// Reads the fixture as UTF-8.
+///
+/// `std::fs::read_to_string` decodes UTF-8 or fails with
+/// `ErrorKind::InvalidData` — it never falls back to a platform locale codec.
+/// That matters: tamga-python's equivalent used a reader that *did*
+/// (`cp1252` on `windows-latest`), so its `non_ascii_value` vector decoded as
+/// mojibake and hashed differently on Windows alone. Every other vector is
+/// pure ASCII and would have stayed green through it, so the suite would have
+/// looked fine while the SDK disagreed with itself across two operating
+/// systems. Rust cannot reach that state here, and
+/// `the_non_ascii_vector_survived_the_read_intact` proves it rather than
+/// asserting it.
 fn fixture() -> Fixture {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/fingerprint/fingerprint.json");
@@ -79,6 +91,29 @@ fn the_fixture_is_not_empty() {
     let f = fixture();
     assert_eq!(f.vectors.len(), 9, "expected 9 positive vectors");
     assert_eq!(f.rejected.len(), 8, "expected 8 rejected cases");
+}
+
+#[test]
+fn the_non_ascii_vector_survived_the_read_intact() {
+    // Guards the decode step itself, ahead of any hashing. A mis-decoding
+    // reader turns "café" into "cafÃ©" and the only symptom downstream is an
+    // opaque digest mismatch; this names the actual cause.
+    let f = fixture();
+    let v = find(&f, "non_ascii_value");
+    let components = pairs(&v.components);
+    assert_eq!(components[0].1, "caf\u{e9}", "fixture decoded as mojibake");
+    assert_eq!(
+        components[0].1.chars().count(),
+        4,
+        "expected 4 scalar values, so the é is one char and not two bytes"
+    );
+    assert_eq!(
+        components[0].1.as_bytes(),
+        &[0x63, 0x61, 0x66, 0xc3, 0xa9],
+        "é must be the two UTF-8 bytes C3 A9"
+    );
+    // And the value must not have been silently normalised on the way in.
+    assert_ne!(components[0].1, "cafe\u{301}");
 }
 
 #[test]

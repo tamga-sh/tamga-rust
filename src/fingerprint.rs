@@ -153,11 +153,19 @@ where
 
     // The spec's "bytewise ascending over the UTF-8 bytes of the whole
     // component". `Ord for String` defers to `Ord for str`, which is `[u8]`
-    // lexicographic ordering over the UTF-8 encoding — not locale-aware
-    // collation, and not code-point order over decoded chars.
-    // `sorts_bytewise_not_by_locale_collation` below pins that rather than
-    // assuming it. A sort, not a set: collapsing equal parts would be the
-    // silent dedup that `DuplicateLabel` exists to refuse.
+    // lexicographic ordering over the UTF-8 encoding — confirmed, not
+    // assumed, by the tests below.
+    //
+    // Note bytewise UTF-8 order and code-point order are the *same* order:
+    // UTF-8 is designed so that byte comparison equals scalar-value
+    // comparison. There is no test to write against that distinction, and a
+    // vector claiming to draw it would be green for no reason. The two
+    // orderings that genuinely differ from this one are sorting
+    // case-insensitively, and sorting on the label alone instead of the whole
+    // `label=value` component; both are pinned below.
+    //
+    // A sort, not a set: collapsing equal parts would be the silent dedup
+    // that `DuplicateLabel` exists to refuse.
     parts.sort_unstable();
 
     let mut out =
@@ -294,12 +302,23 @@ mod tests {
     }
 
     #[test]
-    fn sorts_bytewise_not_by_locale_collation() {
-        // Uppercase 'Z' is 0x5A, lowercase 'a' is 0x61, so bytewise puts
-        // "Z=..." first. Locale-aware collation puts "a" before "Z" — the
-        // ordering this test exists to rule out.
+    fn sorts_case_sensitively_not_by_case_insensitive_collation() {
+        // Uppercase 'Z' is 0x5A, lowercase 'a' is 0x61, so a byte comparison
+        // puts "Z=..." first. Case-insensitive collation — what a
+        // locale-aware sort typically does — puts "a" before "Z". That is a
+        // real alternative ordering, and this rules it out.
         let c = canonical([("a", "1"), ("Z", "2")]).unwrap();
         assert_eq!(c, "tamga-fingerprint-v1\u{1f}Z=2\u{1f}a=1");
+    }
+
+    #[test]
+    fn sorts_on_the_whole_component_not_on_the_label_alone() {
+        // '-' is 0x2D and '=' is 0x3D, so over the whole `label=value`
+        // component "a-b=y" sorts before "a=x". Sorting on the label alone
+        // compares "a" against "a-b" and reverses them — the second ordering
+        // that genuinely differs from the spec's.
+        let c = canonical([("a", "x"), ("a-b", "y")]).unwrap();
+        assert_eq!(c, "tamga-fingerprint-v1\u{1f}a-b=y\u{1f}a=x");
     }
 
     #[test]
