@@ -76,6 +76,36 @@ let result = client
 println!("activation outcome: {:?}", result.meta.code);
 ```
 
+Re-running an activation for a fingerprint the licence already knows is the
+normal case, not an error case — an app reinstalls, or loses the machine id it
+stored. `activate_machine` surfaces the server's `409 FINGERPRINT_TAKEN` raw;
+`activate_machine_idempotent` resolves it into the existing machine instead:
+
+```rust
+let activation = client
+    .activate_machine_idempotent(
+        license_id,
+        "machine-fingerprint",
+        CreateMachineOptions::default(),
+        None,
+        true,
+    )
+    .await?;
+
+if activation.reused {
+    println!("already activated; carrying on");
+}
+println!("outcome: {:?}", activation.validation.meta.code);
+```
+
+It only adopts a machine that is on **this** licence, and that costs nothing:
+all three `machine_uniqueness_strategy` scopes raise the conflict for the
+caller's own rows too, so a genuine re-activation is always found. Under
+`UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` the conflicting machine can instead
+belong to a *different* licence — that conflict is the anti-seat-sharing check
+working, and the `409` propagates unchanged rather than handing back a machine
+this licence does not own.
+
 ## Auth transports
 
 `AuthTransport` covers four of the server's five accepted transports
@@ -266,33 +296,56 @@ verified before.
   ping writes `last_heartbeat_at = now` and derives the status from that same
   timestamp, so it always answers `Alive` or `Resurrected`; reset and create
   answer `NotStarted`; and validate never returns `HEARTBEAT_DEAD`. It *does*
-  arrive on the checkout path: the machine embedded in a `.mach` file, and the
-  one returned by `Client::generate_offline_proof`, are both read from the row
-  rather than echoed from a write, so their `heartbeat_status` is a real
-  staleness verdict and can be `Dead`. Branch on it there, not against a ping.
+  arrive anywhere else: the machine embedded in a `.mach` file, the one
+  returned by `Client::generate_offline_proof`, the ones from
+  `Client::get_machine` and `Client::list_machines` — and the one from
+  `Client::update_machine`, which is a *write* but never touches the
+  heartbeat column, so its verdict is genuine too. The rule is not
+  write-vs-read: a response is `Dead`-free only when the server derived the
+  status from a `last_heartbeat_at` that same request just wrote.
   Never stop the ping loop on a status; a `404` from the ping is the only
   terminal signal and the cue to re-activate
   (`src/models/machine.rs::HeartbeatStatus`).
 - The machine heartbeat window is set by `policy.heartbeat_duration`; 600s is
-  only the fallback used when that column is null. There is no `get_policy` or
-  `get_machine` to read it directly, and `next_heartbeat_at` on the
-  create/ping/reset responses is computed against the fallback, so it will not
-  reveal a shorter window. A verified machine file or a
-  `Client::generate_offline_proof` response will: both resolve through a
-  policy-joined read, so `next_heartbeat_at - last_heartbeat_at` there is the
-  real window. Failing that, choose the
-  ping interval yourself from out-of-band knowledge of the policy, or machines
-  will go `DEAD` while the client believes it is pinging often enough
+  only the fallback used when that column is null. Read the real one with
+  `Client::effective_heartbeat_window(license_id)`, and size the timer with
+  `Client::recommended_heartbeat_interval(license_id)` — one call at startup,
+  not one per tick. Do **not** derive it from `next_heartbeat_at` on a
+  create/ping/reset response: those queries omit the policy join, so the field
+  is computed against the 600s fallback there whatever the policy says, and a
+  client trusting it pings too slowly and its machines go `DEAD` on schedule.
+  `MachineAttributes::observed_heartbeat_window` recovers the genuine window,
+  but only from a response whose query joined `policies` — a verified machine
+  file, an offline proof, `get_machine`, or `list_machines`. Note that
+  `update_machine` falls on the *fallback* side of that split even though its
+  `heartbeat_status` is real: the two fields do not divide the same way
   (`src/models/machine.rs::HeartbeatStatus`).
+- Reading the policy goes through `Client::get_license_policy(license_id)`, not
+  `Client::get_policy(policy_id)`. The latter needs the `policy.read`
+  permission, which the licence-key role does not hold and cannot be granted,
+  so it answers `403` for every licence-key caller. Both return the same
+  resource.
+- `Client::get_license` and `Client::get_license_policy` are **not**
+  licence-scoped server-side: unlike validate and check-out they never call the
+  server's `require_license_scope`, so a licence key can read any licence in
+  the account, `attributes.key` in plaintext included. No machine route calls
+  it either, and the licence-key role holds `machine.read`, `machine.update`
+  and `machine.delete` — so a licence key can read, patch and delete any
+  machine in the account. Reported upstream; the SDK cannot narrow what the
+  server allows. A machine resource carries no `license_id` and no
+  `relationships`, so `ListMachinesOptions::license_id` is the only way to
+  establish which licence a machine belongs to.
 - The server does not reap process rows. The 30-second process heartbeat window
   and its delete-on-expiry sweep exist in a worker that has no call site and no
   scheduler tick, so no process is ever marked dead and no row is ever removed.
   `Client::create_process` increments the licence's `machines_process_count`
   against the policy's `max_processes` and nothing decrements it on its own, so
   a process registered and abandoned holds its slot permanently. Releasing it
-  needs an explicit `DELETE /processes/{id}` — the route exists server-side but
-  this crate does not expose it yet, so keep PIDs stable and register only
-  what is worth tracking (`src/models/machine.rs::Pid`).
+  needs an explicit `Client::delete_process` (or
+  `Client::delete_machine_processes` for a machine's whole set) — call one on a
+  shutdown path that actually runs. There is no `Drop`-based equivalent:
+  `Drop` cannot be `async`. Keeping PIDs stable bounds the damage if that path
+  is missed (`src/models/machine.rs::Pid`).
 - Quick-validate's `last_validated_at` write is skipped whenever the request
   carries an `Origin` header, and the two responses are identical. This SDK
   never sets `Origin`, but a proxy that does turns the write off silently
@@ -304,7 +357,23 @@ verified before.
   (`src/models/policy.rs`).
 - The `blocking` cargo feature is declared but has no code behind it yet;
   there is no synchronous wrapper around `Client` today.
-- Release / auto-update checking is not part of this crate's surface.
+- `Client::check_for_upgrade` answers `UpgradeCheck::NoUpdateOffered` for the
+  server's `204 No Content`, which covers **two** situations: no newer release
+  exists, and one exists that this licence has expired out of. The server
+  refuses to distinguish them on purpose — a denial would leak that a version
+  the caller cannot have is out there. Report it as *no update available*,
+  never as *you are on the latest version*.
+- `Client::list_machines` is offset paginated (`page[number]`/`page[size]`,
+  with a `meta.page` total) while every other listing here is keyset. It has no
+  `page[after]`, and no `filter[fingerprint]` either — `filter[q]` is a
+  substring search across name/hostname/fingerprint, so
+  `Client::find_machine_by_fingerprint` narrows with it and then matches
+  exactly client-side.
+- `Client::health` is the only call that sends no credential. The server
+  resolves a request's credential before consulting its public-route list, and
+  in singleplayer mode it does so even for a path with no account segment — so
+  a credential the policy refuses would `401` the one call meant to isolate
+  that failure from a host-header misconfiguration.
 - `tests/fixtures/` is still empty: the checkout tests build fixtures
   in-process against the documented wire format rather than replaying
   captured server output.
