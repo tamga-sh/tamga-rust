@@ -140,23 +140,37 @@ use it to pass a server-derived timestamp rather than a local clock a user can
 wind back.
 
 Machine files verify the same way through
-`tamga::checkout::machine_file::verify_machine_file`, with two differences:
+`tamga::checkout::machine_file::verify_machine_file`, with three differences:
 the signature scheme comes from the licence's own `scheme` field rather than
-being fixed to Ed25519, and decrypting one needs both the licence key **and**
-the machine fingerprint. Lighter-weight machine proofs
+being fixed to Ed25519, decrypting one needs both the licence key **and** the
+machine fingerprint, and an encrypted `.mach` file's `enc` is
+`"<nonce_b64>.<cipher_b64>"` — two separately base64-encoded halves, where the
+`.lic` form is a single blob. `verify_machine_file_with_claims` and
+`verify_machine_file_at` mirror their licence-file counterparts, including the
+server-timestamp escape hatch. Lighter-weight machine proofs
 (`"v1x0.<base64 signature>"`, always RSA-2048 PKCS#1 v1.5 / SHA-256) verify
 through `tamga::proof::verify_offline_proof`.
 
-### Compatibility warning: licence files are format v2 only
+### Compatibility warning: both offline formats are v2 only
 
 `alg` must end in `+v2`, and the signed `meta` claims (`iat`, `exp`, `jti`,
-`kid`) live inside the signature. **A v1-issued `.lic` file is rejected
-outright — there is no fallback path**
-(`src/checkout/license_file.rs::verify_license_file_at`), so any caller
-holding a v1 file must check out a fresh one. This is a real behavioural
-break, and it is the point of v2: in v1 the requested TTL lived only in the
-unsigned JSON:API envelope around the certificate, so a 24-hour trial file
-stayed cryptographically valid forever.
+`kid`) live inside the signature. **A v1-issued `.lic` or `.mach` file is
+rejected outright — there is no fallback path**
+(`src/checkout/license_file.rs::verify_license_file_at`,
+`src/checkout/machine_file.rs::verify_machine_file_at`), so any caller holding
+a v1 file must check out a fresh one. This is a real behavioural break, and it
+is the point of v2: in v1 the requested TTL lived only in the unsigned JSON:API
+envelope around the certificate, so a 24-hour trial file stayed
+cryptographically valid forever, and the AES key was derived by zero-padding
+the licence key rather than through HKDF.
+
+For machine files this is also a **bug fix**: until now the verifier split
+`alg` at the first `+` and compared the whole remainder (`ed25519+v2`) against
+the bare signing suffix (`ed25519`), so every file the server actually issued
+was refused as an unsupported algorithm, and it read an encrypted `enc` as one
+base64 blob, which this crate's strict base64 engine refuses outright at the
+`.` separator. Nothing that verified before verifies differently now — nothing
+verified before.
 
 ## Security notes
 
@@ -175,7 +189,14 @@ stayed cryptographically valid forever.
   `CLOCK_SKEW_TOLERANCE_SECS` in
   `src/checkout/license_file.rs::verify_license_file_at` covers ordinary NTP
   drift and nothing more — the clock belongs to the attacker, so a generous
-  allowance would just extend every expired file.
+  allowance would just extend every expired file. `.mach` files enforce the
+  same `meta.exp` against the same constant, and report the same
+  `CheckoutError::Expired`, so a caller can tell "expired, fetch a fresh one"
+  from "forged or corrupt" on either format. A file with no `exp` — a checkout
+  made without a `ttl` — genuinely never expires; that is the server's design,
+  not a missing check. Pass a server-derived timestamp to
+  `verify_license_file_at`/`verify_machine_file_at` rather than trusting a
+  local clock a user can wind back.
 - **The signature covers the base64 string, not the decoded bytes.** The
   Ed25519 signature is verified over the ASCII/UTF-8 bytes of the `enc`
   field's base64 *string* (`src/checkout/license_file.rs` passes

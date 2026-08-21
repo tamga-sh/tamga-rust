@@ -1,4 +1,4 @@
-//! `.mach` file parsing and verification.
+//! `.mach` file parsing and verification (format v2 only).
 //!
 //! Same shape as `.lic` (see [`crate::checkout::license_file`]) with these
 //! machine-specific differences:
@@ -19,14 +19,70 @@
 //!   `salt="tamga:machine-file-key-v1"`, `ikm=<license key>`,
 //!   `info=<machine fingerprint>` → 32-byte AES key. A verifier needs both
 //!   the license key and the target machine's fingerprint to decrypt.
-//! - No signed `exp` claim, and so no expiry enforcement — that is specific
-//!   to the licence file's format v2 payload.
+//!
+//! # The `alg` string
+//!
+//! `<encoding>+<signing suffix>+v2`, three `+`-separated fields:
+//!
+//! | field | values |
+//! |---|---|
+//! | encoding | `base64` (plain) · `aes-256-gcm` (encrypted) |
+//! | signing suffix | `ed25519` · `ecdsa-p256` · `rsa-sha256` · `rsa-pss-sha256` |
+//! | version | `v2`, mandatory |
+//!
+//! Two of those values contain hyphens (`aes-256-gcm`, `rsa-pss-sha256`), so
+//! the fields must be cut at the **first** and **last** `+` — never by
+//! comparing the whole post-`+` remainder against a suffix, and never by a
+//! substring test, which would also wave through `base64+ed25519+v3` and
+//! `xbase64+ed25519+v2junk`.
+//!
+//! **A file without the `+v2` marker is rejected outright.** v1 carried no
+//! `meta.exp` inside the signed payload and derived its AES key by zero-padding
+//! the licence key instead of through HKDF. Accepting one reinstates both
+//! weaknesses, and its signature still checks out, because `sig` covers `enc`
+//! alone — nothing else in the certificate is authenticated.
+//!
+//! # The encrypted `enc` field
+//!
+//! `"<nonce_b64>.<cipher_b64>"` — two **separately** base64-encoded halves, not
+//! one base64 blob of `nonce ‖ ciphertext ‖ tag`. The ciphertext half already
+//! includes the 16-byte GCM tag. The plain (`base64+…`) variant is a single
+//! blob with no dot; branch on the encoding prefix from `alg`, not on whether a
+//! dot happens to be present.
+//!
+//! # Order of operations
+//!
+//! Verify the signature over `enc`'s **string** bytes first, then split, then
+//! decode, then decrypt. Attacker-controlled bytes are never decoded before
+//! they are authenticated.
+//!
+//! # The signed claims
+//!
+//! The payload is `{"data": <MachineResource>, "meta": <claims>}`, the same
+//! [`MachineFileClaims`] the licence-file format carries. `exp` is **optional
+//! by design** — a checkout requested without a `ttl` produces a file that
+//! genuinely never expires, so its absence is legitimate rather than an error.
+//! When present it is enforced against a 60-second clock-skew tolerance, using
+//! the same constant as the licence-file path so the two formats cannot drift
+//! into different grace periods.
 //!
 //! Public API: [`verify_machine_file`] dispatches to the correct verifier in
-//! [`crate::crypto`] based on the caller-supplied `scheme`.
+//! [`crate::crypto`] based on the caller-supplied `scheme`,
+//! [`verify_machine_file_with_claims`] additionally returns the signed claims,
+//! and [`verify_machine_file_at`] takes the current time from the caller.
 
 const PEM_HEADER: &str = "-----BEGIN MACHINE FILE-----";
 const PEM_FOOTER: &str = "-----END MACHINE FILE-----";
+
+/// The mandatory trailing field of a machine-file `alg` string.
+const ALG_VERSION_MARKER: &str = "v2";
+
+/// AES-256-GCM nonce length, in bytes.
+const NONCE_LEN: usize = 12;
+
+/// AES-GCM authentication tag length, in bytes. The server appends it to the
+/// ciphertext, so a ciphertext half shorter than this cannot be genuine.
+const GCM_TAG_LEN: usize = 16;
 
 /// The `machine-files` JSON:API resource returned by
 /// `POST .../machines/{id}/actions/check-out`: `{ id, type, attributes }`.
@@ -49,14 +105,17 @@ pub struct MachineFile {
     /// The PEM-wrapped `.mach` certificate string — pass to
     /// [`verify_machine_file`].
     pub certificate: String,
-    /// `"{base64|aes-256-gcm}+{ed25519|rsa-sha256|rsa-pss-sha256|ecdsa-p256}"`.
+    /// `"{base64|aes-256-gcm}+{ed25519|rsa-sha256|rsa-pss-sha256|ecdsa-p256}+v2"`,
+    /// matching `certificate`'s inner `alg` field.
     pub algorithm: String,
     /// **Always `[]`** — same caveat as license files.
     pub includes: Vec<String>,
-    /// TTL in seconds, if requested. Metadata only — same caveat as license
-    /// files.
+    /// TTL in seconds, if requested. **Metadata only** — the authoritative
+    /// expiry is the signed `meta.exp` claim inside the certificate, which
+    /// [`verify_machine_file`] enforces. Same caveat as license files.
     pub ttl: Option<i64>,
-    /// Absolute expiry timestamp, if `ttl` was set.
+    /// Absolute expiry timestamp, if `ttl` was set. Same "metadata only"
+    /// caveat as `ttl`.
     pub expiry: Option<chrono::DateTime<chrono::Utc>>,
     /// When this checkout call was issued.
     pub issued: chrono::DateTime<chrono::Utc>,
@@ -79,6 +138,31 @@ pub fn check_ttl(ttl: u64) -> Result<(), crate::error::CheckoutError> {
     Ok(())
 }
 
+/// The claims carried *inside* a machine file's signed bytes.
+///
+/// Byte-identical to the licence file's, because the server builds both from
+/// the same `LicenseFileClaims` struct (`check_out_machine.rs` serialises it
+/// straight into the machine payload's `meta`). Aliased rather than duplicated
+/// so the two cannot drift.
+///
+/// An alias of convenience, not a promise that the two claim sets stay
+/// field-identical forever: if the server ever gives machine files a claim of
+/// their own this becomes a distinct type, which would break anyone who had
+/// relied on the two being the same type (a trait impl, say). Treat it as the
+/// name for "a machine file's claims", not as a synonym you can substitute
+/// either way.
+pub type MachineFileClaims = crate::checkout::license_file::LicenseFileClaims;
+
+/// A verified machine file: the resource plus the claims that were signed
+/// alongside it.
+#[derive(Debug, Clone)]
+pub struct VerifiedMachineFile {
+    /// The machine the file describes.
+    pub machine: crate::models::machine::MachineResource,
+    /// The claims that were covered by the signature.
+    pub claims: MachineFileClaims,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct CertPayload {
     enc: String,
@@ -86,9 +170,23 @@ struct CertPayload {
     alg: String,
 }
 
+/// `{"data": <MachineResource>, "meta": <claims>}` — what `enc`
+/// decodes/decrypts to in format v2. `meta` is **not** optional: every v2 file
+/// the server issues carries it, so a payload without one is refused rather
+/// than treated as a file that never expires.
 #[derive(Debug, serde::Deserialize)]
 struct DataPayload {
     data: crate::models::machine::MachineResource,
+    meta: MachineFileClaims,
+}
+
+/// How `enc` is encoded, as declared by the first field of `alg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncEncoding {
+    /// `base64` — `enc` is one base64 blob of the payload JSON.
+    Plain,
+    /// `aes-256-gcm` — `enc` is `"<nonce_b64>.<cipher_b64>"`.
+    Aes256Gcm,
 }
 
 /// Maps a [`crate::models::policy::LicenseScheme`] to its `alg` suffix,
@@ -109,9 +207,45 @@ fn scheme_alg_suffix(scheme: crate::models::policy::LicenseScheme) -> &'static s
     }
 }
 
+/// Splits `alg` into its encoding and signing-suffix fields, rejecting
+/// anything that is not exactly `<encoding>+<signing suffix>+v2` for a known
+/// encoding.
+///
+/// The encoding is everything before the **first** `+` and the version marker
+/// everything after the **last** one; whatever sits between them is the signing
+/// suffix. Neither `aes-256-gcm` nor `rsa-pss-sha256` contains a `+`, only
+/// hyphens, so the three fields are unambiguous — but a `split_once('+')` whose
+/// remainder is then compared against the bare signing suffix rejects every
+/// genuine file (the remainder is `ed25519+v2`, not `ed25519`), and a substring
+/// test accepts forgeries.
+fn parse_alg(alg: &str) -> Result<(EncEncoding, &str), crate::error::CheckoutError> {
+    let unsupported = || crate::error::CheckoutError::UnsupportedAlgorithm(alg.to_string());
+
+    let (encoding, rest) = alg.split_once('+').ok_or_else(unsupported)?;
+    let (signing_suffix, version) = rest.rsplit_once('+').ok_or_else(unsupported)?;
+
+    // A v1 file has only two fields and lands on the `rsplit_once` above; this
+    // catches a third field that is present but is not the v2 marker.
+    if version != ALG_VERSION_MARKER {
+        return Err(unsupported());
+    }
+    // More than three fields: the middle would still hold a `+`.
+    if signing_suffix.is_empty() || signing_suffix.contains('+') {
+        return Err(unsupported());
+    }
+
+    let encoding = match encoding {
+        "base64" => EncEncoding::Plain,
+        "aes-256-gcm" => EncEncoding::Aes256Gcm,
+        _ => return Err(unsupported()),
+    };
+    Ok((encoding, signing_suffix))
+}
+
 /// Parses and fully verifies a `.mach` file, returning the embedded
 /// [`crate::models::machine::MachineResource`] once the signature (and
-/// decryption, if encrypted) has checked out.
+/// decryption, if encrypted) has checked out and the signed `exp` claim has
+/// been found to be in the future.
 ///
 /// The embedded resource is a **read** of the machine row taken at checkout
 /// time, not the echo of a write, and the server resolves it through a
@@ -129,13 +263,22 @@ fn scheme_alg_suffix(scheme: crate::models::policy::LicenseScheme) -> &'static s
 /// [`crate::models::policy::LicenseScheme::Ed25519Sign`] — the server's own
 /// default when generating a machine file for an unset scheme.
 ///
-/// `pubkey` is the raw public key for `scheme`: 32 bytes for Ed25519, a
-/// SubjectPublicKeyInfo (SPKI) DER blob for either RSA variant, or a
-/// 65-byte uncompressed P-256 point for ECDSA.
+/// `pubkey` is the raw public key for `scheme`, exactly as the server's
+/// `extract_public_key` produces it: 32 bytes for Ed25519, a DER `RSAPublicKey`
+/// blob for either RSA variant, or a 65-byte uncompressed P-256 point for
+/// ECDSA.
 ///
 /// `license_key`/`fingerprint` are required only for an encrypted
 /// (`aes-256-gcm+...`) file — both are needed to re-derive the HKDF key
 /// (see `src/crypto/hkdf.rs`).
+///
+/// A file whose `alg` lacks the `+v2` suffix is rejected as
+/// [`crate::error::CheckoutError::UnsupportedAlgorithm`] — there is no v1
+/// fallback. The signed `exp` claim, when the file carries one, is enforced
+/// against the system clock with a 60 second skew tolerance and surfaces as
+/// [`crate::error::CheckoutError::Expired`], the same distinct outcome the
+/// licence-file path uses; use [`verify_machine_file_at`] to supply the time
+/// yourself.
 pub fn verify_machine_file(
     pem: &str,
     scheme: crate::models::policy::LicenseScheme,
@@ -143,6 +286,48 @@ pub fn verify_machine_file(
     license_key: Option<&str>,
     fingerprint: Option<&str>,
 ) -> Result<crate::models::machine::MachineResource, crate::error::CheckoutError> {
+    verify_machine_file_with_claims(pem, scheme, pubkey, license_key, fingerprint)
+        .map(|v| v.machine)
+}
+
+/// As [`verify_machine_file`], also returning the signed claims.
+///
+/// Use this when you want `jti` for replay detection or `kid` for key-rotation
+/// bookkeeping. Expiry is enforced either way — it is not opt-in.
+pub fn verify_machine_file_with_claims(
+    pem: &str,
+    scheme: crate::models::policy::LicenseScheme,
+    pubkey: &[u8],
+    license_key: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
+    verify_machine_file_at(
+        pem,
+        scheme,
+        pubkey,
+        license_key,
+        fingerprint,
+        crate::checkout::license_file::unix_now(),
+    )
+}
+
+/// As [`verify_machine_file_with_claims`], with the current time supplied by
+/// the caller.
+///
+/// Two uses, the same two as
+/// [`crate::checkout::license_file::verify_license_file_at`]. Tests get
+/// determinism. And an application that keeps a server-supplied timestamp —
+/// the recommended defence against a user winding the system clock back to
+/// revive an expired file — can pass that instead of trusting the local clock,
+/// which on an offline-verification path belongs to the attacker.
+pub fn verify_machine_file_at(
+    pem: &str,
+    scheme: crate::models::policy::LicenseScheme,
+    pubkey: &[u8],
+    license_key: Option<&str>,
+    fingerprint: Option<&str>,
+    now_unix: i64,
+) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
     use crate::models::policy::LicenseScheme;
 
     // ⚠️ Reject up front — before any parsing — rather than let a
@@ -166,19 +351,20 @@ pub fn verify_machine_file(
         .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
     let cert: CertPayload = serde_json::from_slice(&cert_json)?;
 
-    let (enc_prefix, alg_suffix) = cert
-        .alg
-        .split_once('+')
-        .ok_or_else(|| crate::error::CheckoutError::UnsupportedAlgorithm(cert.alg.clone()))?;
+    let (encoding, signing_suffix) = parse_alg(&cert.alg)?;
+    // Cross-check only: the file agreeing with the caller rules out a mixed-up
+    // key, but it can never *select* the primitive — `rsa-sha256` is emitted
+    // for two different schemes.
     let expected_suffix = scheme_alg_suffix(scheme);
-    if alg_suffix != expected_suffix {
+    if signing_suffix != expected_suffix {
         return Err(crate::error::CheckoutError::UnsupportedAlgorithm(format!(
-            "file declares alg suffix {alg_suffix:?}, expected {expected_suffix:?} for the supplied scheme"
+            "file declares alg suffix {signing_suffix:?}, expected {expected_suffix:?} for the supplied scheme"
         )));
     }
 
     // ⚠️ Same gotcha as license files: signature covers `enc`'s ASCII/UTF-8
-    // STRING bytes, never its decoded bytes.
+    // STRING bytes, never its decoded bytes. Nothing below this point runs
+    // until it has passed.
     let sig_bytes = B64
         .decode(&cert.sig)
         .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
@@ -208,34 +394,62 @@ pub fn verify_machine_file(
         }
     }
 
-    let enc_bytes = B64
-        .decode(&cert.enc)
-        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
-
-    let plaintext = match enc_prefix {
-        "base64" => enc_bytes,
-        "aes-256-gcm" => {
+    let plaintext = match encoding {
+        EncEncoding::Plain => B64
+            .decode(&cert.enc)
+            .map_err(|_| crate::error::CheckoutError::InvalidBase64)?,
+        EncEncoding::Aes256Gcm => {
             let key_str = license_key.ok_or(crate::error::CheckoutError::LicenseKeyMissing)?;
             let fp = fingerprint.ok_or(crate::error::CheckoutError::FingerprintMissing)?;
             let key = crate::crypto::hkdf::derive_machine_file_key(key_str, fp);
-            if enc_bytes.len() < 12 + 16 {
+
+            // `"<nonce_b64>.<cipher_b64>"` — two SEPARATELY base64-encoded
+            // halves (the server's `FieldEncryption::encrypt` returns
+            // `format!("{nonce_b64}.{cipher_b64}")`), not one base64 blob of
+            // `nonce ‖ ciphertext ‖ tag`. Decoding the whole string as one
+            // fails outright: `.` is not in the base64 alphabet.
+            let (nonce_b64, cipher_b64) = cert
+                .enc
+                .split_once('.')
+                .ok_or(crate::error::CryptoError::DecryptionFailed)?;
+
+            let nonce: [u8; NONCE_LEN] = B64
+                .decode(nonce_b64)
+                .map_err(|_| crate::error::CheckoutError::InvalidBase64)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| crate::error::CryptoError::DecryptionFailed)?;
+
+            // The ciphertext half already carries the 16-byte GCM tag.
+            let ciphertext_and_tag = B64
+                .decode(cipher_b64)
+                .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
+            if ciphertext_and_tag.len() < GCM_TAG_LEN {
                 return Err(crate::error::CryptoError::DecryptionFailed.into());
             }
-            let (nonce_bytes, ciphertext_and_tag) = enc_bytes.split_at(12);
-            let nonce: [u8; 12] = nonce_bytes
-                .try_into()
-                .expect("split_at(12) guarantees a 12-byte slice");
-            crate::crypto::aes_gcm::decrypt(&key, &nonce, ciphertext_and_tag)?
-        }
-        other => {
-            return Err(crate::error::CheckoutError::UnsupportedAlgorithm(
-                other.to_string(),
-            ));
+
+            crate::crypto::aes_gcm::decrypt(&key, &nonce, &ciphertext_and_tag)?
         }
     };
 
     let payload: DataPayload = serde_json::from_slice(&plaintext)?;
-    Ok(payload.data)
+
+    // The signature proves the file is authentic. It does not prove it is
+    // still valid — that is this check. `exp` is absent for a checkout made
+    // without a `ttl`, which genuinely never expires, so absence is not an
+    // error. Same constant as the licence-file path, deliberately.
+    if let Some(exp) = payload.meta.exp {
+        // `saturating_sub`, not `-`: `now_unix` comes from the caller, and an
+        // absurd one must not panic in a debug build or wrap in a release one.
+        if now_unix.saturating_sub(crate::checkout::license_file::CLOCK_SKEW_TOLERANCE_SECS) > exp {
+            return Err(crate::error::CheckoutError::Expired { exp });
+        }
+    }
+
+    Ok(VerifiedMachineFile {
+        machine: payload.data,
+        claims: payload.meta,
+    })
 }
 
 #[cfg(test)]
@@ -245,7 +459,22 @@ mod tests {
     use base64::Engine as _;
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-    fn representative_payload_json() -> String {
+    /// Fixed instant used as `iat` throughout, so nothing here reads a clock.
+    const ISSUED_AT: i64 = 1_767_225_600;
+
+    /// These build their own certificates, which is only sound for coverage of
+    /// branches a captured artefact cannot reach (missing key, malformed PEM,
+    /// a payload with no `exp`). Interop with the bytes the server actually
+    /// emits is pinned by `tests/machine_file_v2_fixtures.rs`, which iterates
+    /// server-produced fixtures — a self-built fixture only ever proves the
+    /// verifier agrees with itself.
+    fn representative_payload_json(exp: Option<i64>) -> String {
+        let mut meta = serde_json::json!({
+            "iat": ISSUED_AT, "jti": "test-jti", "kid": "test-kid"
+        });
+        if let Some(exp) = exp {
+            meta["exp"] = serde_json::json!(exp);
+        }
         serde_json::json!({
             "data": {
                 "type": "machines",
@@ -257,7 +486,8 @@ mod tests {
                     "next_heartbeat_at": null, "last_check_out_at": null, "metadata": {},
                     "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
                 }
-            }
+            },
+            "meta": meta
         })
         .to_string()
     }
@@ -320,8 +550,14 @@ mod tests {
         }
     }
 
-    fn build_pem(scheme: LicenseScheme, encrypt_key: Option<[u8; 32]>) -> (Vec<u8>, String) {
-        let payload = representative_payload_json();
+    /// Reproduces the server's `encode_machine_file`, including the mandatory
+    /// `+v2` marker and the dot-separated encrypted `enc`.
+    fn build_pem_with(
+        scheme: LicenseScheme,
+        encrypt_key: Option<[u8; 32]>,
+        exp: Option<i64>,
+    ) -> (Vec<u8>, String) {
+        let payload = representative_payload_json(exp);
         let suffix = scheme_alg_suffix(scheme);
         let (enc_prefix, enc) = match encrypt_key {
             None => ("base64", B64.encode(payload.as_bytes())),
@@ -329,44 +565,104 @@ mod tests {
                 use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
                 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
                 let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
-                let mut nonce_bytes = [0u8; 12];
+                let mut nonce_bytes = [0u8; NONCE_LEN];
                 AeadOsRng.fill_bytes(&mut nonce_bytes);
                 let nonce = Nonce::from(nonce_bytes);
                 let ciphertext_and_tag = cipher.encrypt(&nonce, payload.as_bytes()).unwrap();
-                let mut out = nonce_bytes.to_vec();
-                out.extend_from_slice(&ciphertext_and_tag);
-                ("aes-256-gcm", B64.encode(&out))
+                // `<nonce_b64>.<cipher_b64>` — separately encoded halves.
+                (
+                    "aes-256-gcm",
+                    format!(
+                        "{}.{}",
+                        B64.encode(nonce_bytes),
+                        B64.encode(&ciphertext_and_tag)
+                    ),
+                )
             }
         };
         let (pubkey, sig_bytes) = sign_for_scheme(scheme, &enc);
         let sig = B64.encode(&sig_bytes);
-        let alg = format!("{enc_prefix}+{suffix}");
+        let alg = format!("{enc_prefix}+{suffix}+{ALG_VERSION_MARKER}");
         let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": alg });
         let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
         (pubkey, format!("{PEM_HEADER}\n{pem_body}\n{PEM_FOOTER}"))
     }
 
+    fn build_pem(scheme: LicenseScheme, encrypt_key: Option<[u8; 32]>) -> (Vec<u8>, String) {
+        build_pem_with(scheme, encrypt_key, None)
+    }
+
+    /// Verifies at a fixed instant, so no test here depends on the wall clock.
+    fn verify_at_issue_time(
+        pem: &str,
+        scheme: LicenseScheme,
+        pubkey: &[u8],
+        license_key: Option<&str>,
+        fingerprint: Option<&str>,
+    ) -> Result<VerifiedMachineFile, crate::error::CheckoutError> {
+        verify_machine_file_at(pem, scheme, pubkey, license_key, fingerprint, ISSUED_AT)
+    }
+
+    // ── alg parsing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_alg_cuts_at_the_first_and_last_plus() {
+        assert_eq!(
+            parse_alg("base64+ed25519+v2").unwrap(),
+            (EncEncoding::Plain, "ed25519")
+        );
+        // Both fields carry hyphens; only the `+` positions may be trusted.
+        assert_eq!(
+            parse_alg("aes-256-gcm+rsa-pss-sha256+v2").unwrap(),
+            (EncEncoding::Aes256Gcm, "rsa-pss-sha256")
+        );
+        assert_eq!(
+            parse_alg("aes-256-gcm+ecdsa-p256+v2").unwrap(),
+            (EncEncoding::Aes256Gcm, "ecdsa-p256")
+        );
+    }
+
+    #[test]
+    fn parse_alg_refuses_anything_that_is_not_exactly_v2() {
+        for bad in [
+            "base64+ed25519",          // v1: no version field at all
+            "base64+ed25519+v1",       // an explicit older version
+            "base64+ed25519+v3",       // a substring test would accept this
+            "base64+ed25519+v2junk",   // ...and this
+            "xbase64+ed25519+v2",      // ...and this
+            "base64+ed25519+extra+v2", // four fields
+            "base64++v2",              // empty signing suffix
+            "base64",                  // no `+` at all
+            "",                        // empty
+            "aes-256-cbc+ed25519+v2",  // unknown encoding
+        ] {
+            assert!(parse_alg(bad).is_err(), "alg {bad:?} must not be accepted");
+        }
+    }
+
+    // ── round trips, one per supported scheme ────────────────────────────
+
     #[test]
     fn ed25519_machine_file_round_trip() {
         let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, None);
         let machine =
-            verify_machine_file(&pem, LicenseScheme::Ed25519Sign, &pubkey, None, None).unwrap();
-        assert_eq!(machine.attributes.fingerprint, "fp-abc123");
+            verify_at_issue_time(&pem, LicenseScheme::Ed25519Sign, &pubkey, None, None).unwrap();
+        assert_eq!(machine.machine.attributes.fingerprint, "fp-abc123");
     }
 
     #[test]
     fn rsa_pkcs1_machine_file_round_trip() {
         let (pubkey, pem) = build_pem(LicenseScheme::Rsa2048Pkcs1Sign, None);
         let machine =
-            verify_machine_file(&pem, LicenseScheme::Rsa2048Pkcs1Sign, &pubkey, None, None)
+            verify_at_issue_time(&pem, LicenseScheme::Rsa2048Pkcs1Sign, &pubkey, None, None)
                 .unwrap();
-        assert_eq!(machine.attributes.fingerprint, "fp-abc123");
+        assert_eq!(machine.machine.attributes.fingerprint, "fp-abc123");
     }
 
     #[test]
     fn rsa_pss_machine_file_round_trip() {
         let (pubkey, pem) = build_pem(LicenseScheme::Rsa2048Pkcs1PssSign, None);
-        let machine = verify_machine_file(
+        let machine = verify_at_issue_time(
             &pem,
             LicenseScheme::Rsa2048Pkcs1PssSign,
             &pubkey,
@@ -374,16 +670,27 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(machine.attributes.fingerprint, "fp-abc123");
+        assert_eq!(machine.machine.attributes.fingerprint, "fp-abc123");
     }
 
     #[test]
     fn ecdsa_p256_machine_file_round_trip() {
         let (pubkey, pem) = build_pem(LicenseScheme::EcdsaP256Sign, None);
         let machine =
-            verify_machine_file(&pem, LicenseScheme::EcdsaP256Sign, &pubkey, None, None).unwrap();
+            verify_at_issue_time(&pem, LicenseScheme::EcdsaP256Sign, &pubkey, None, None).unwrap();
+        assert_eq!(machine.machine.attributes.fingerprint, "fp-abc123");
+    }
+
+    #[test]
+    fn the_plain_entry_point_returns_just_the_machine_resource() {
+        let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, None);
+        // No `exp`, so the system-clock entry point is safe to call here.
+        let machine =
+            verify_machine_file(&pem, LicenseScheme::Ed25519Sign, &pubkey, None, None).unwrap();
         assert_eq!(machine.attributes.fingerprint, "fp-abc123");
     }
+
+    // ── encryption ───────────────────────────────────────────────────────
 
     #[test]
     fn encrypted_machine_file_requires_correct_fingerprint() {
@@ -393,7 +700,7 @@ mod tests {
         let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, Some(*key));
 
         // Correct fingerprint decrypts fine.
-        let machine = verify_machine_file(
+        let machine = verify_at_issue_time(
             &pem,
             LicenseScheme::Ed25519Sign,
             &pubkey,
@@ -401,19 +708,201 @@ mod tests {
             Some(fingerprint),
         )
         .unwrap();
-        assert_eq!(machine.attributes.fingerprint, "fp-abc123");
+        assert_eq!(machine.machine.attributes.fingerprint, "fp-abc123");
 
         // Wrong fingerprint fails cleanly (wrong derived key -> AEAD tag
         // mismatch), not a panic or silent corruption.
-        let result = verify_machine_file(
+        let result = verify_at_issue_time(
             &pem,
             LicenseScheme::Ed25519Sign,
             &pubkey,
             Some(license_key),
             Some("wrong-fingerprint"),
         );
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(crate::error::CheckoutError::Crypto(
+                crate::error::CryptoError::DecryptionFailed
+            ))
+        ));
     }
+
+    #[test]
+    fn an_encrypted_file_needs_both_the_licence_key_and_the_fingerprint() {
+        let key = crate::crypto::hkdf::derive_machine_file_key("lic-abc123", "fp-abc123");
+        let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, Some(*key));
+
+        assert!(matches!(
+            verify_at_issue_time(
+                &pem,
+                LicenseScheme::Ed25519Sign,
+                &pubkey,
+                None,
+                Some("fp-abc123")
+            ),
+            Err(crate::error::CheckoutError::LicenseKeyMissing)
+        ));
+        assert!(matches!(
+            verify_at_issue_time(
+                &pem,
+                LicenseScheme::Ed25519Sign,
+                &pubkey,
+                Some("lic-abc123"),
+                None
+            ),
+            Err(crate::error::CheckoutError::FingerprintMissing)
+        ));
+    }
+
+    #[test]
+    fn an_encrypted_enc_without_a_dot_separator_is_refused() {
+        // A single base64 blob of `nonce ‖ ciphertext ‖ tag` — what the
+        // server's stale doc comment describes, and what every SDK
+        // implemented. The server does not produce it, so it must not open.
+        let license_key = "lic-abc123";
+        let fingerprint = "fp-abc123";
+        let key = crate::crypto::hkdf::derive_machine_file_key(license_key, fingerprint);
+        let payload = representative_payload_json(None);
+        let enc = {
+            use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+            use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
+            let mut nonce_bytes = [0u8; NONCE_LEN];
+            AeadOsRng.fill_bytes(&mut nonce_bytes);
+            let ciphertext_and_tag = cipher
+                .encrypt(&Nonce::from(nonce_bytes), payload.as_bytes())
+                .unwrap();
+            let mut out = nonce_bytes.to_vec();
+            out.extend_from_slice(&ciphertext_and_tag);
+            B64.encode(&out)
+        };
+        let (pubkey, sig_bytes) = sign_for_scheme(LicenseScheme::Ed25519Sign, &enc);
+        let cert = serde_json::json!({
+            "enc": enc,
+            "sig": B64.encode(&sig_bytes),
+            "alg": "aes-256-gcm+ed25519+v2",
+        });
+        let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        let pem = format!("{PEM_HEADER}\n{pem_body}\n{PEM_FOOTER}");
+
+        assert!(matches!(
+            verify_at_issue_time(
+                &pem,
+                LicenseScheme::Ed25519Sign,
+                &pubkey,
+                Some(license_key),
+                Some(fingerprint)
+            ),
+            Err(crate::error::CheckoutError::Crypto(
+                crate::error::CryptoError::DecryptionFailed
+            ))
+        ));
+    }
+
+    // ── the signed exp claim ─────────────────────────────────────────────
+
+    #[test]
+    fn an_expired_machine_file_is_refused_even_though_its_signature_is_valid() {
+        let exp = ISSUED_AT + 3600;
+        let (pubkey, pem) = build_pem_with(LicenseScheme::Ed25519Sign, None, Some(exp));
+        let err = verify_machine_file_at(
+            &pem,
+            LicenseScheme::Ed25519Sign,
+            &pubkey,
+            None,
+            None,
+            exp + 3600,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CheckoutError::Expired { exp: e } if e == exp
+        ));
+    }
+
+    #[test]
+    fn a_machine_file_within_its_ttl_verifies() {
+        let exp = ISSUED_AT + 3600;
+        let (pubkey, pem) = build_pem_with(LicenseScheme::Ed25519Sign, None, Some(exp));
+        let verified = verify_machine_file_at(
+            &pem,
+            LicenseScheme::Ed25519Sign,
+            &pubkey,
+            None,
+            None,
+            exp - 60,
+        )
+        .unwrap();
+        assert_eq!(verified.claims.exp, Some(exp));
+    }
+
+    #[test]
+    fn a_machine_file_without_an_exp_claim_never_expires() {
+        // `check_out_machine.rs` sets `exp` to `ttl.map(..)`, so a checkout
+        // made without a TTL genuinely produces a file with no expiry.
+        // Absence is legitimate — not an error, and not "expired at the epoch".
+        let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, None);
+        let verified = verify_machine_file_at(
+            &pem,
+            LicenseScheme::Ed25519Sign,
+            &pubkey,
+            None,
+            None,
+            i64::MAX / 2,
+        )
+        .unwrap();
+        assert!(verified.claims.exp.is_none());
+    }
+
+    #[test]
+    fn machine_file_expiry_uses_the_same_skew_tolerance_as_the_licence_file() {
+        let exp = ISSUED_AT + 3600;
+        let (pubkey, pem) = build_pem_with(LicenseScheme::Ed25519Sign, None, Some(exp));
+        let at = |now| {
+            verify_machine_file_at(&pem, LicenseScheme::Ed25519Sign, &pubkey, None, None, now)
+        };
+        let tolerance = crate::checkout::license_file::CLOCK_SKEW_TOLERANCE_SECS;
+        assert_eq!(tolerance, 60, "the tolerance is seconds, not hours");
+        assert!(at(exp + tolerance).is_ok());
+        assert!(at(exp + tolerance + 1).is_err());
+    }
+
+    #[test]
+    fn a_payload_without_a_meta_block_is_refused() {
+        // Format v2 always carries `meta`. A payload without one is either v1
+        // or forged; either way there is no `exp` to enforce, so accepting it
+        // would be the permanent-file problem again.
+        let payload = serde_json::json!({
+            "data": {
+                "type": "machines",
+                "id": "01926b3e-2222-7000-8000-000000000000",
+                "attributes": {
+                    "fingerprint": "fp-abc123", "cores": 4, "memory": null, "disk": null,
+                    "ip": null, "hostname": "host1", "platform": "linux", "name": null,
+                    "heartbeat_status": "NOT_STARTED", "last_heartbeat_at": null,
+                    "next_heartbeat_at": null, "last_check_out_at": null, "metadata": {},
+                    "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+                }
+            }
+        })
+        .to_string();
+        let enc = B64.encode(payload.as_bytes());
+        let (pubkey, sig_bytes) = sign_for_scheme(LicenseScheme::Ed25519Sign, &enc);
+        let cert = serde_json::json!({
+            "enc": enc,
+            "sig": B64.encode(&sig_bytes),
+            "alg": "base64+ed25519+v2",
+        });
+        let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        let pem = format!("{PEM_HEADER}\n{pem_body}\n{PEM_FOOTER}");
+
+        assert!(matches!(
+            verify_at_issue_time(&pem, LicenseScheme::Ed25519Sign, &pubkey, None, None),
+            Err(crate::error::CheckoutError::InvalidJson(_))
+        ));
+    }
+
+    // ── rejections ───────────────────────────────────────────────────────
 
     #[test]
     fn rsa_jwt_rs256_scheme_rejected_before_any_signature_attempt() {
@@ -426,6 +915,20 @@ mod tests {
         assert!(matches!(
             result,
             Err(crate::error::CheckoutError::SchemeNotSupported)
+        ));
+    }
+
+    #[test]
+    fn a_malformed_pem_envelope_is_refused() {
+        assert!(matches!(
+            verify_at_issue_time(
+                "not a pem",
+                LicenseScheme::Ed25519Sign,
+                &[0u8; 32],
+                None,
+                None
+            ),
+            Err(crate::error::CheckoutError::MalformedPem)
         ));
     }
 
@@ -446,14 +949,32 @@ mod tests {
         // File genuinely signed+verifiable under Ed25519, but caller
         // claims RSA-PKCS1 — the alg-suffix cross-check must catch this
         // before any RSA verification is even attempted (a raw pubkey
-        // byte slice from an Ed25519 key isn't valid SPKI DER anyway, but
+        // byte slice from an Ed25519 key isn't valid DER anyway, but
         // the suffix check should short-circuit first with a clear error).
         let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, None);
         let result =
-            verify_machine_file(&pem, LicenseScheme::Rsa2048Pkcs1Sign, &pubkey, None, None);
+            verify_at_issue_time(&pem, LicenseScheme::Rsa2048Pkcs1Sign, &pubkey, None, None);
         assert!(matches!(
             result,
             Err(crate::error::CheckoutError::UnsupportedAlgorithm(_))
+        ));
+    }
+
+    #[test]
+    fn a_v1_alg_is_refused_outright() {
+        // `sig` covers `enc` alone, so stripping `+v2` leaves a file whose
+        // signature still verifies. Only the explicit marker check stops it.
+        let (pubkey, pem) = build_pem(LicenseScheme::Ed25519Sign, None);
+        let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        let mut cert: serde_json::Value =
+            serde_json::from_slice(&B64.decode(body.trim()).unwrap()).unwrap();
+        cert["alg"] = serde_json::json!("base64+ed25519");
+        let repacked = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        let v1_pem = format!("{PEM_HEADER}\n{repacked}\n{PEM_FOOTER}");
+
+        assert!(matches!(
+            verify_at_issue_time(&v1_pem, LicenseScheme::Ed25519Sign, &pubkey, None, None),
+            Err(crate::error::CheckoutError::UnsupportedAlgorithm(ref a)) if a == "base64+ed25519"
         ));
     }
 }

@@ -13,12 +13,22 @@
 //! material is embedded in the application — this offline-verification path
 //! is the core value proposition of this SDK over hand-rolling HTTP calls.
 //!
-//! ## Offline licence files are format v2 only
+//! ## Offline files are format v2 only
 //!
-//! [`checkout::license_file::verify_license_file`] accepts only an `alg`
-//! ending in `+v2` and enforces the signed `exp` claim (60 second clock-skew
-//! tolerance). A v1-issued `.lic` file is rejected outright — there is no
-//! fallback path. See [`checkout::license_file`] for why.
+//! [`checkout::license_file::verify_license_file`] and
+//! [`checkout::machine_file::verify_machine_file`] accept only an `alg`
+//! ending in `+v2` and enforce the signed `exp` claim against the same 60
+//! second clock-skew tolerance, reporting
+//! [`error::CheckoutError::Expired`] for a file that has simply run out. A
+//! v1-issued `.lic` or `.mach` file is rejected outright — there is no
+//! fallback path. See [`checkout::license_file`] for why, and
+//! [`checkout::machine_file`] for the two places the `.mach` wire format
+//! differs (a three-field `alg`, and a dot-separated encrypted `enc`).
+//!
+//! Pass a server-derived timestamp to
+//! [`checkout::license_file::verify_license_file_at`] or
+//! [`checkout::machine_file::verify_machine_file_at`] rather than trusting a
+//! local clock the user can wind back.
 //!
 //! ## Rate limiting
 //!

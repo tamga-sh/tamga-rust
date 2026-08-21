@@ -71,7 +71,9 @@ fn build_payload_json(
 /// tuple it should have been generated for. Always RSA-2048 PKCS#1 v1.5 /
 /// SHA-256, regardless of the license's own `scheme`.
 ///
-/// Works fully offline once `rsa_pubkey` (SubjectPublicKeyInfo DER) is
+/// Works fully offline once `rsa_pubkey` (a DER-encoded PKCS#1
+/// `RSAPublicKey`, not an SPKI blob — see
+/// [`crate::crypto::rsa::verify_pkcs1`]) is
 /// embedded in the calling application.
 pub fn verify_offline_proof(
     proof: &str,

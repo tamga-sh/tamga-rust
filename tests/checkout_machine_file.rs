@@ -38,7 +38,8 @@ fn representative_payload_json() -> String {
                 "next_heartbeat_at": null, "last_check_out_at": null, "metadata": {},
                 "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
             }
-        }
+        },
+        "meta": { "iat": 1_767_225_600, "jti": "test-jti", "kid": "test-kid" }
     })
     .to_string()
 }
@@ -46,7 +47,7 @@ fn representative_payload_json() -> String {
 fn build_plain_pem(signing_key: &SigningKey) -> String {
     let enc = B64.encode(representative_payload_json().as_bytes());
     let sig = B64.encode(signing_key.sign(enc.as_bytes()).to_bytes());
-    let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": "base64+ed25519" });
+    let cert = serde_json::json!({ "enc": enc, "sig": sig, "alg": "base64+ed25519+v2" });
     let pem_body = B64.encode(serde_json::to_string(&cert).unwrap().as_bytes());
     format!("-----BEGIN MACHINE FILE-----\n{pem_body}\n-----END MACHINE FILE-----")
 }
@@ -108,7 +109,7 @@ async fn check_out_machine_json_parses_enveloped_resource() {
                 "id": "01926b3e-3333-7000-8000-000000000000",
                 "attributes": {
                     "certificate": pem,
-                    "algorithm": "base64+ed25519",
+                    "algorithm": "base64+ed25519+v2",
                     "includes": [],
                     "ttl": null,
                     "expiry": null,
@@ -124,7 +125,7 @@ async fn check_out_machine_json_parses_enveloped_resource() {
         .check_out_machine_json(machine_id, false, None)
         .await
         .unwrap();
-    assert_eq!(file.attributes.algorithm, "base64+ed25519");
+    assert_eq!(file.attributes.algorithm, "base64+ed25519+v2");
 }
 
 #[tokio::test]

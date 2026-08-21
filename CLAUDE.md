@@ -49,7 +49,7 @@ tamga-rust/
 │   ├── crypto/                      # ed25519, rsa, ecdsa, aes_gcm, hkdf, naive_key — primitives only
 │   ├── checkout/                    # license_file.rs (.lic), machine_file.rs (.mach) — format + orchestration
 │   └── proof.rs                     # machine offline proof (byte-exact serialization + RSA verify)
-├── tests/fixtures/                  # known-good .lic/.mach files (not yet captured)
+├── tests/fixtures/                  # known-good offline files; machine-file-v2/ captured, .lic + proof pending
 └── examples/                        # validate_license.rs, verify_license_file.rs
 ```
 
@@ -236,11 +236,55 @@ Machine file: salt `"tamga:machine-file-key-v1"`, info = the machine fingerprint
 needs the fingerprint as well as the license key. Do not "unify" them into a single derivation;
 that silently breaks interop with whichever format you did not have in mind.
 
-This paragraph previously described the license-file key as "intentionally not a KDF" — the raw key
-bytes zero-padded to 32, via a `src/crypto/naive_key.rs` that no longer exists. That was true before
+The paragraph above previously described the license-file key as "intentionally not a KDF" — the
+raw key bytes zero-padded to 32, via a `src/crypto/naive_key.rs` that no longer exists. That was true before
 offline format v2 and is not now; `src/checkout/license_file.rs` calls
 `crypto::hkdf::derive_license_file_key`. Corrected 2026-08-20 after `tamga-c`'s native rewrite was
 checked against the actual code rather than against this file.
+
+**The two formats also lay out an encrypted `enc` differently** — the same trap one level up. A
+`.lic` file's is a single base64 blob of `nonce ‖ ciphertext ‖ tag`. A `.mach` file's is
+`"<nonce_b64>.<cipher_b64>"` — two **separately** base64-encoded halves, because the machine path
+runs through the server's `FieldEncryption::encrypt`
+(`tamga-api/src/shared/crypto/field_encryption.rs:110`) instead of sealing the bytes inline. Slicing
+a nonce off the first 12 bytes of a single decode is what this crate did until 2026-08-21, and every
+SDK reads it the same wrong way, because the server's own doc comment above `encode_machine_file`
+still claims `base64(nonce‖ciphertext‖tag)` and contradicts the code directly beneath it. Trust the
+code, not that comment. Branch on the encoding prefix from `alg`, never on whether a dot happens to
+be present.
+
+**Whether that misreading actually *fails* depends on how strict the SDK's base64 decoder is, which
+is why it went unnoticed for so long.** Both halves are separately padded to a multiple of four (16
+and 896 chars on `ed25519_encrypted_valid`), so a decoder that silently skips non-alphabet
+characters decodes `nonce_b64 . cipher_b64` as one stream and reconstructs `nonce ‖ ciphertext ‖
+tag` byte-for-byte — the wrong parse lands on the right bytes by accident. That is what CPython and
+Node do. Rust's `base64` STANDARD engine is strict and refuses at the separator (`Invalid symbol 46,
+offset 16`), so here it was an outright failure rather than a latent one. Measured, not assumed: the
+probe is reproducible against `tests/fixtures/machine-file-v2/ed25519_encrypted_valid.machine`. The
+fix is the same either way; only the severity differs per language.
+
+**`alg` on a machine file is three `+`-separated fields, and two of them contain hyphens.**
+`<encoding>+<signing suffix>+v2`, where encoding is `base64` or `aes-256-gcm` and the suffix is one
+of `ed25519` / `ecdsa-p256` / `rsa-sha256` / `rsa-pss-sha256`. Cut at the **first** and the **last**
+`+`. A `split_once('+')` whose remainder is compared against the bare suffix rejects every genuine
+file — that was this crate's bug — and a `contains()` test accepts `base64+ed25519+v3` and
+`xbase64+ed25519+v2junk`. `rsa-sha256` is emitted for **both** `RSA_2048_PKCS1_SIGN` and
+`RSA_2048_JWT_RS256`, so `alg` can never select the primitive; the caller-supplied `scheme` is
+authoritative and `alg` is a cross-check only.
+
+**Machine files carry the same signed `meta` claims as licence files, and `exp` is enforced.**
+`check_out_machine.rs:119-133` builds `{"data": <MachineResource>, "meta": <LicenseFileClaims>}`.
+`exp` is `ttl.map(..)`, so its absence is legitimate and means the file never expires — do not treat
+a missing `exp` as an error. When present it is checked against
+`license_file::CLOCK_SKEW_TOLERANCE_SECS`, deliberately the same constant both formats share, and
+surfaces as `CheckoutError::Expired`. `verify_machine_file_at` takes a caller-supplied timestamp for
+the same reason `verify_license_file_at` does: on an offline path the local clock is the attacker's.
+
+**RSA public keys here are DER `RSAPublicKey`, not SPKI.** `crypto::rsa::verify_pkcs1`/`verify_pss`
+and `proof::verify_offline_proof` all take the bare
+`SEQUENCE { modulus, publicExponent }` that `aws-lc-rs` accepts and that the server's
+`extract_public_key` produces. Their doc comments said SubjectPublicKeyInfo until 2026-08-21;
+feeding an actual SPKI blob makes every genuine signature report `VerificationFailed`.
 
 **Byte-exact JSON for offline proof** (`src/proof.rs`) — the signed payload's field order must match
 the server's exactly. The server builds it via `serde_json::json!(...)`, and `serde_json::Map` is
@@ -266,7 +310,12 @@ acts as a drift canary if a future dependency bump ever flips `preserve_order` o
   These must come from a real server response, not be hand-constructed — the point of these tests is
   confirming this SDK's verifier reproduces the server's *actual* signing/serialization behavior
   (notably the base64-string-vs-decoded-bytes gotcha above), which a hand-built fixture matching this
-  SDK's own assumptions cannot catch.
+  SDK's own assumptions cannot catch. `tests/fixtures/machine-file-v2/` is the first set that
+  actually exists: 12 files from the server's `encode_machine_file`, driven by a `manifest.json` that
+  `tests/machine_file_v2_fixtures.rs` **iterates** rather than naming files, so new schemes and
+  variants extend coverage by being dropped in. Never add a fixture this crate generated — a
+  self-built machine-file fixture is precisely how three verification defects survived two years of
+  green CI in all eight SDKs at once.
 - **`src/crypto/`, `src/checkout/` and `src/proof.rs` require a `security-reviewer` pass before
   merge.** Do not batch multiple crypto areas into one PR; each covers materially different
   primitives.

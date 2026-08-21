@@ -148,7 +148,11 @@ pub struct VerifiedLicenseFile {
 /// Deliberately small. The client's clock is under the attacker's control, so
 /// a generous allowance is just a free extension of every expired file; this
 /// covers ordinary NTP drift and nothing more.
-const CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
+///
+/// Shared with [`crate::checkout::machine_file`], which enforces the same
+/// `exp` claim over the same signed `meta` block. Two constants would let the
+/// two file formats silently drift into different grace periods.
+pub(crate) const CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
 
 /// Parses and fully verifies a `.lic` file (from either
 /// [`crate::Client::check_out_license`]'s raw PEM string or
@@ -197,9 +201,11 @@ pub fn verify_license_file_with_claims(
 ///
 /// `chrono` is built here without its `clock` feature on purpose (the SDK does
 /// not want a system-time dependency in its default build), so this reads the
-/// clock directly. A clock set before the epoch yields 0, which fails every
-/// expiry check closed rather than open.
-fn unix_now() -> i64 {
+/// clock directly. A clock set before the epoch yields 0.
+///
+/// Shared with [`crate::checkout::machine_file`] so both offline file formats
+/// read the same clock.
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -274,7 +280,9 @@ pub fn verify_license_file_at(
     // still valid — that is this check, and skipping it is what made v1 files
     // permanent.
     if let Some(exp) = payload.meta.exp {
-        if now_unix - CLOCK_SKEW_TOLERANCE_SECS > exp {
+        // `saturating_sub`, not `-`: `now_unix` comes from the caller, and an
+        // absurd one must not panic in a debug build or wrap in a release one.
+        if now_unix.saturating_sub(CLOCK_SKEW_TOLERANCE_SECS) > exp {
             return Err(crate::error::CheckoutError::Expired { exp });
         }
     }
