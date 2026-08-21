@@ -6,11 +6,19 @@
 //! The server's `ArtifactAttributes` carries `#[serde(rename_all =
 //! "camelCase")]` **and** explicit `#[serde(rename = "created")]` /
 //! `#[serde(rename = "updated")]` on its two timestamps
-//! (`artifacts/serializer.rs:20,34-37`). So the wire names are `redirectUrl`
-//! — camelCased — but `created` and `updated`, *not* `createdAt`/`updatedAt`.
-//! An SDK that applies camelCase uniformly to this resource decodes two null
-//! timestamps and reports nothing wrong. Both renames are spelled out
-//! explicitly below rather than left to `rename_all`.
+//! (`artifacts/serializer.rs:20,34-37`). Its *fields* are `created_at` and
+//! `updated_at`, so without those renames it would emit `createdAt` and
+//! `updatedAt`. It does not: the wire names are `redirectUrl` — camelCased —
+//! but `created` and `updated`.
+//!
+//! An SDK that assumes camelCase throughout therefore looks for
+//! `createdAt`/`updatedAt` and finds nothing. This crate names its fields
+//! `created`/`updated` to match the wire directly, which means the explicit
+//! renames below are belt-and-braces rather than load-bearing —
+//! camelCasing a single lowercase word is the identity. That was measured:
+//! deleting them leaves the tests green. They stay as documentation of a trap
+//! that is easy to reintroduce, and `created_at_spelling_does_not_decode`
+//! is what actually guards the direction.
 //!
 //! [`crate::models::release::ReleaseResource`] has the same shape for the
 //! same reason.
@@ -176,8 +184,13 @@ mod tests {
 
     #[test]
     fn an_absent_redirect_url_decodes_to_none() {
-        // List and show omit the key entirely rather than sending null, so
-        // `#[serde(default)]` is load-bearing, not decoration.
+        // List and show omit the key entirely rather than sending null. Note
+        // `#[serde(default)]` on the field is belt-and-braces: serde's derive
+        // already decodes a missing `Option<T>` as `None`. Removing it leaves
+        // this test green, which was measured rather than assumed. It stays
+        // because it states the intent at the field, and because a future
+        // change of the field's type away from `Option` would then fail loudly
+        // here instead of silently requiring the key.
         let json = full_attributes_json();
         assert!(json["attributes"].get("redirectUrl").is_none());
         let r: ArtifactResource = serde_json::from_value(json).unwrap();

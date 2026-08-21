@@ -301,6 +301,17 @@ async fn an_out_of_range_ttl_surfaces_the_servers_validation_error() {
         TamgaError::Api(e) => assert_eq!(e.code, "PRESIGN_TTL_INVALID"),
         other => panic!("expected Api, got {other:?}"),
     }
+    // And specifically NOT the typed variant: that one is mapped from
+    // `TTL_INVALID`, which is what the *checkout* routes emit. The download
+    // route's code is a different string and has no typed case.
+    let err2 = test_client(&server)
+        .artifact_download_url(artifact_id, Some(std::time::Duration::from_secs(1)))
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(err2, TamgaError::TtlInvalidApi(_)),
+        "PRESIGN_TTL_INVALID must not be mistaken for TTL_INVALID"
+    );
 }
 
 #[tokio::test]
@@ -649,4 +660,198 @@ async fn an_api_failure_propagates_through_the_download_error() {
         ArtifactDownloadError::Api(TamgaError::Forbidden(_)) => {}
         other => panic!("expected Api(Forbidden), got {other:?}"),
     }
+}
+
+// ── Measured: what reqwest actually forwards across a redirect ──────────────
+//
+// These two tests do not exercise the SDK. They measure the behaviour of the
+// `reqwest` version this crate is built against, so the doc comment on
+// `artifact_download_url` can state what was observed rather than what an
+// upstream source file appears to say. They are the reason that method uses a
+// redirect-disabled client instead of relying on the mitigation below.
+
+/// Builds the same kind of client `Client::new` does, with reqwest's default
+/// redirect policy left in place.
+fn default_policy_client() -> reqwest::Client {
+    reqwest::Client::builder().build().unwrap()
+}
+
+#[tokio::test]
+async fn measured_reqwest_strips_authorization_across_an_origin_boundary() {
+    let target = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/target"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&target)
+        .await;
+
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(303)
+                .insert_header("location", format!("{}/target", target.uri()).as_str()),
+        )
+        .mount(&origin)
+        .await;
+
+    default_policy_client()
+        .get(format!("{}/start", origin.uri()))
+        .header("Authorization", "License lic-abc")
+        .send()
+        .await
+        .unwrap();
+
+    let hits = target.received_requests().await.unwrap();
+    assert_eq!(hits.len(), 1, "the redirect was followed, as expected");
+    assert!(
+        hits[0].headers.get("authorization").is_none(),
+        "MEASURED: reqwest forwarded Authorization across an origin boundary"
+    );
+}
+
+#[tokio::test]
+async fn measured_reqwest_keeps_authorization_within_one_origin() {
+    // The case that makes the hazard real: the server's `s3_endpoint` +
+    // `s3_force_path_style` settings allow object storage on the API's own
+    // origin, and reqwest's stripping is keyed on host and port differing.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/target"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/target"))
+        .mount(&server)
+        .await;
+
+    default_policy_client()
+        .get(format!("{}/start", server.uri()))
+        .header("Authorization", "License lic-abc")
+        .send()
+        .await
+        .unwrap();
+
+    let hits: Vec<Request> = server.received_requests().await.unwrap();
+    let target_hit = hits
+        .iter()
+        .find(|r| r.url.path() == "/target")
+        .expect("the same-origin redirect was followed");
+    assert_eq!(
+        target_hit
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap()),
+        Some("License lic-abc"),
+        "MEASURED: reqwest dropped Authorization within one origin"
+    );
+}
+
+// ── The ceiling on a response with no Content-Length ────────────────────────
+
+/// A one-shot HTTP/1.1 server that answers `Transfer-Encoding: chunked` with
+/// **no** `Content-Length`.
+///
+/// `wiremock` always sets a `Content-Length`, which means the cheap pre-check
+/// in `download_artifact` fires first and the streaming guard behind it is
+/// never reached. A storage host that streams is the case where
+/// `Content-Length` is absent and the streaming guard is the *only* thing
+/// enforcing `max_bytes`, so it needs a server that actually behaves that
+/// way. Raw `std::net`, no new dependency.
+fn spawn_chunked_server(chunks: Vec<&'static [u8]>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        // Drain the request head so the client's write completes.
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            line.clear();
+        }
+
+        let mut stream = stream;
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        );
+        for chunk in chunks {
+            let _ = write!(stream, "{:x}\r\n", chunk.len());
+            let _ = stream.write_all(chunk);
+            let _ = stream.write_all(b"\r\n");
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+        let _ = stream.flush();
+    });
+
+    format!("http://{addr}")
+}
+
+/// Points the API's download action at an arbitrary URL.
+async fn api_pointing_at(artifact_id: uuid::Uuid, redirect_url: String) -> MockServer {
+    let api = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/artifacts/{artifact_id}/actions/download"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "type": "artifacts",
+                "id": artifact_id.to_string(),
+                "attributes": {
+                    "filename": "acme.bin",
+                    "filetype": null, "filesize": null, "checksum": null,
+                    "platform": null, "arch": null, "signature": null,
+                    "status": "UPLOADED",
+                    "redirectUrl": redirect_url,
+                    "metadata": {},
+                    "created": "2026-01-01T00:00:00Z",
+                    "updated": "2026-01-02T00:00:00Z",
+                }
+            }
+        })))
+        .mount(&api)
+        .await;
+    api
+}
+
+#[tokio::test]
+async fn the_ceiling_still_holds_when_the_host_sends_no_content_length() {
+    let artifact_id = uuid::Uuid::from_u128(2);
+    // 3 x 8 bytes = 24, streamed, with no Content-Length to pre-check.
+    let url = spawn_chunked_server(vec![b"AAAAAAAA", b"BBBBBBBB", b"CCCCCCCC"]);
+    let api = api_pointing_at(artifact_id, url).await;
+
+    let err = test_client(&api)
+        .download_artifact(artifact_id, None, 16)
+        .await
+        .unwrap_err();
+    match err {
+        ArtifactDownloadError::TooLarge { limit } => assert_eq!(limit, 16),
+        other => panic!("expected TooLarge from the streaming guard, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_chunked_body_under_the_ceiling_downloads_whole() {
+    // The complement: the streaming guard must not truncate a legitimate
+    // multi-chunk body.
+    let artifact_id = uuid::Uuid::from_u128(2);
+    let url = spawn_chunked_server(vec![b"AAAAAAAA", b"BBBBBBBB", b"CCCCCCCC"]);
+    let api = api_pointing_at(artifact_id, url).await;
+
+    let bytes = test_client(&api)
+        .download_artifact(artifact_id, None, 24)
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"AAAAAAAABBBBBBBBCCCCCCCC");
 }

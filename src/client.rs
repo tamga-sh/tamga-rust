@@ -2270,23 +2270,28 @@ impl Client {
     /// automatically — and every request this client makes carries either an
     /// `Authorization: License …` header or a `?token=` query parameter.
     ///
-    /// `reqwest` 0.12 does drop `Authorization` when a redirect crosses to a
-    /// different host or port (`redirect.rs::remove_sensitive_headers`), so
-    /// the usual S3 case would not leak the key. That mitigation is narrower
-    /// than it looks and is not something to build on:
+    /// What `reqwest` does with the credential across that hop was measured
+    /// against the version this crate builds on, not inferred — see
+    /// `measured_reqwest_strips_authorization_across_an_origin_boundary` and
+    /// `measured_reqwest_keeps_authorization_within_one_origin` in
+    /// `tests/artifacts.rs`:
     ///
-    /// - it is keyed on host **and port** being different, so a deployment
-    ///   fronting object storage on the same origin — a MinIO or path-style
-    ///   proxy behind the API's own domain — stays same-host and the header
-    ///   survives;
-    /// - it covers headers only, and this crate's other transport puts the
-    ///   credential in a query parameter;
-    /// - it is one upstream crate's internal behaviour, not a guarantee this
-    ///   SDK's contract can rest on.
+    /// - **cross-origin**, the `Authorization` header is dropped. The usual
+    ///   S3 case does not leak the key.
+    /// - **same-origin**, it arrives intact. This is not hypothetical: the
+    ///   server's `s3_endpoint` and `s3_force_path_style` settings allow
+    ///   object storage on the API's own origin, and that configuration hands
+    ///   the licence key to the storage host.
     ///
-    /// Independently of credentials, following the redirect would stream the
-    /// whole artifact — up to the server's 1 GiB upload ceiling — into a
-    /// response this method then tries to decode as JSON.
+    /// The mitigation is also headers-only, so it does nothing for
+    /// [`crate::transport::AuthTransport::Query`], whose credential rides in
+    /// the query string.
+    ///
+    /// There is a second reason not to follow the redirect that holds in
+    /// **every** configuration, credentials aside: following it buffers the
+    /// artifact's bytes before anything can reject them, and an artifact
+    /// routinely exceeds any sane response cap — the server admits uploads up
+    /// to 1 GiB, and this method would then try to parse that as JSON.
     ///
     /// So this method defends twice. `redirect=false` is sent
     /// unconditionally — there is no code path here that omits it — and the
@@ -2305,7 +2310,16 @@ impl Client {
     ///
     /// Seconds of validity for the presigned URL. The server **validates**
     /// rather than clamps: outside `[60s, 1 week]` it answers `422
-    /// PRESIGN_TTL_INVALID`, surfaced here as [`crate::TamgaError::Api`].
+    /// PRESIGN_TTL_INVALID` (`artifacts/service.rs:33`).
+    ///
+    /// Note that code is **not** the `TTL_INVALID` the checkout routes emit
+    /// (`check_out_license.rs:48`), so it does **not** land on
+    /// [`crate::TamgaError::TtlInvalidApi`] — the only typed TTL case this
+    /// crate has. It arrives as the generic [`crate::TamgaError::Api`];
+    /// match on `code` if you need to tell it apart. Adding a variant for it
+    /// is not available: `TamgaError` is public and not `#[non_exhaustive]`,
+    /// so that would be a breaking change.
+    ///
     /// `None` leaves the server's own 300s default in place. Sub-second
     /// precision is truncated — the parameter is whole seconds on the wire.
     ///
@@ -2423,6 +2437,16 @@ impl Client {
         }
 
         // Cheap rejection before a single body byte is read.
+        //
+        // This cannot change the *outcome*: the streaming guard below would
+        // reject the same download on the same input, and deleting this block
+        // leaves the whole suite green — measured, not assumed. It is a
+        // bandwidth optimisation, not a correctness guard, so it is
+        // deliberately not pinned by a test of its own. The streaming guard is
+        // the one that must hold, and
+        // `the_ceiling_still_holds_when_the_host_sends_no_content_length`
+        // exercises it against a server that sends no `Content-Length` at all,
+        // which is the case this block cannot cover.
         if let Some(len) = response.content_length() {
             if len > max_bytes {
                 return Err(E::TooLarge { limit: max_bytes });

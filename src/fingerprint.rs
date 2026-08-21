@@ -156,13 +156,25 @@ where
     // lexicographic ordering over the UTF-8 encoding — confirmed, not
     // assumed, by the tests below.
     //
-    // Note bytewise UTF-8 order and code-point order are the *same* order:
-    // UTF-8 is designed so that byte comparison equals scalar-value
-    // comparison. There is no test to write against that distinction, and a
-    // vector claiming to draw it would be green for no reason. The two
-    // orderings that genuinely differ from this one are sorting
+    // Two non-obvious properties, both of which say the same thing: do not
+    // spend a test on "bytewise versus code-point order".
+    //
+    // First, they are the *same* order. UTF-8 is constructed so that byte
+    // comparison equals scalar-value comparison, so no input distinguishes
+    // them.
+    //
+    // Second, and more strongly: for any *valid* input a value's bytes can
+    // never decide the ordering at all. Labels are unique and ASCII-printable,
+    // so when two components are compared the first differing byte is always
+    // either inside the two labels or at the `=` terminating one of them —
+    // always below 0x80. `non_ascii_value` therefore pins UTF-8 *hashing*,
+    // not sorting, and a multi-component non-ASCII vector would prove nothing.
+    //
+    // The two orderings that genuinely differ from the spec's are sorting
     // case-insensitively, and sorting on the label alone instead of the whole
-    // `label=value` component; both are pinned below.
+    // `label=value` component. Both are pinned below, with the expected order
+    // derived from the byte values in the spec rather than from this
+    // function's own output.
     //
     // A sort, not a set: collapsing equal parts would be the silent dedup
     // that `DuplicateLabel` exists to refuse.
