@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2](https://github.com/tamga-sh/tamga-rust/compare/v0.3.1...v0.3.2) - 2026-08-21
+
+### Bug Fixes
+
+- Canonicalise machine fingerprints before they reach the seat count (00e41c1)
+
+- Read and download release artifacts without leaking the licence key (8702275)
+
+- Drop a fingerprint sort claim that no mutation can falsify (f6fde13)
+
+- Replace two overclaiming artifact comments with what was measured (e788157)
+
+- Refuse a non-http redirectUrl and measure every transport across the hop (7c5f788)
+
+
+
 ## [0.3.1](https://github.com/tamga-sh/tamga-rust/compare/v0.3.0...v0.3.1) - 2026-08-21
 
 ### Bug Fixes
