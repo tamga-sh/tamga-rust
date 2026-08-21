@@ -5,7 +5,7 @@
 //!
 //! - [`license`] — `LicenseResource`.
 //! - [`validation`] — `ScopeObject` (8 fields), `ValidationMeta`,
-//!   `ValidationCode` (24 variants, 14 reachable today).
+//!   `ValidationCode` (24 variants, 16 reachable today).
 //! - [`machine`] — `MachineResource`, `HeartbeatStatus`, `ComponentResource`,
 //!   `ProcessResource`, the `Pid` newtype (wire-format string, not integer).
 //! - [`entitlement`] — `EntitlementResource`.

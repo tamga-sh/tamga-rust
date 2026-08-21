@@ -154,6 +154,10 @@ async fn each_reachable_validation_code_deserializes_from_a_mocked_response() {
         ("POLICY_SCOPE_MISMATCH", VC::PolicyScopeMismatch),
         ("USER_SCOPE_MISMATCH", VC::UserScopeMismatch),
         ("ENVIRONMENT_SCOPE_MISMATCH", VC::EnvironmentScopeMismatch),
+        // Both became reachable when the server started enforcing
+        // `scope.entitlements` and `scope.fingerprint`; the list missed them.
+        ("ENTITLEMENTS_MISSING", VC::EntitlementsMissing),
+        ("FINGERPRINT_SCOPE_MISMATCH", VC::FingerprintScopeMismatch),
         ("TOO_MANY_MACHINES", VC::TooManyMachines),
         ("TOO_MANY_CORES", VC::TooManyCores),
         ("TOO_MUCH_MEMORY", VC::TooMuchMemory),
@@ -161,7 +165,7 @@ async fn each_reachable_validation_code_deserializes_from_a_mocked_response() {
         ("TOO_MANY_PROCESSES", VC::TooManyProcesses),
         ("TOO_MANY_USES", VC::TooManyUses),
     ];
-    assert_eq!(reachable.len(), 14, "must cover all 14 reachable codes");
+    assert_eq!(reachable.len(), 16, "must cover all 16 reachable codes");
 
     for (wire, expected) in reachable {
         let mock_server = MockServer::start().await;
