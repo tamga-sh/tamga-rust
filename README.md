@@ -98,11 +98,13 @@ if activation.reused {
 println!("outcome: {:?}", activation.validation.meta.code);
 ```
 
-It only adopts a machine that is on **this** licence. Under a policy with
-`machine_uniqueness_strategy` set to `UNIQUE_PER_POLICY` or
-`UNIQUE_PER_ACCOUNT`, the conflicting machine can belong to a different
-licence — that conflict is the anti-seat-sharing check working, and the `409`
-propagates unchanged.
+It only adopts a machine that is on **this** licence, and that costs nothing:
+all three `machine_uniqueness_strategy` scopes raise the conflict for the
+caller's own rows too, so a genuine re-activation is always found. Under
+`UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` the conflicting machine can instead
+belong to a *different* licence — that conflict is the anti-seat-sharing check
+working, and the `409` propagates unchanged rather than handing back a machine
+this licence does not own.
 
 ## Auth transports
 

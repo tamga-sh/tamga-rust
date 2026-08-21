@@ -216,7 +216,7 @@ async fn find_machine_by_fingerprint_matches_exactly_not_by_substring() {
         .await;
 
     let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(Some(license_id), "fp-abc")
+        .find_machine_by_fingerprint(license_id, "fp-abc")
         .await
         .unwrap()
         .expect("the exact fingerprint is present");
@@ -239,7 +239,7 @@ async fn find_machine_by_fingerprint_returns_none_when_only_near_misses_come_bac
         .await;
 
     let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(Some(license_id), "fp-abc")
+        .find_machine_by_fingerprint(license_id, "fp-abc")
         .await
         .unwrap();
     assert!(found.is_none());
@@ -272,7 +272,7 @@ async fn find_machine_by_fingerprint_walks_past_the_first_page() {
         .await;
 
     let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(Some(license_id), "fp-abc")
+        .find_machine_by_fingerprint(license_id, "fp-abc")
         .await
         .unwrap()
         .expect("found on the second page");
@@ -280,35 +280,35 @@ async fn find_machine_by_fingerprint_walks_past_the_first_page() {
 }
 
 #[tokio::test]
-async fn find_machine_by_fingerprint_can_search_the_whole_account() {
-    // The diagnostic mode: "is anything holding this fingerprint?". It answers
-    // a different question from "is this mine" — the resource carries no
-    // license_id, so a hit here cannot be attributed to a licence.
+async fn find_machine_by_fingerprint_always_scopes_to_the_licence() {
+    // Not a convenience: the resource carries no license_id, so filter[license]
+    // is the only thing that makes "this machine is yours" checkable. And it
+    // costs nothing — all three uniqueness strategies raise FINGERPRINT_TAKEN
+    // for the caller's own rows too, so a genuine re-activation is always
+    // inside the scoped search.
     let mock_server = MockServer::start().await;
-    let held = uuid::Uuid::from_u128(4);
+    let license_id = uuid::Uuid::from_u128(11);
 
     Mock::given(method("GET"))
         .and(path("/v1/accounts/acc-123/machines"))
-        .and(query_param("filter[q]", "fp-abc"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "data": [machine_json(held, "fp-abc", "ALIVE")],
-            "meta": page_meta(1, 100, 1, 1),
+            "data": [],
+            "meta": page_meta(1, 100, 0, 0),
         })))
         .mount(&mock_server)
         .await;
 
-    let found = test_client(&mock_server)
-        .find_machine_by_fingerprint(None, "fp-abc")
+    test_client(&mock_server)
+        .find_machine_by_fingerprint(license_id, "fp-abc")
         .await
-        .unwrap()
-        .expect("something in the account holds it");
-    assert_eq!(found.id, held);
+        .unwrap();
 
     let requests = mock_server.received_requests().await.unwrap();
     let query = requests[0].url.query().unwrap_or_default();
     assert!(
-        !query.contains("filter%5Blicense%5D") && !query.contains("filter[license]"),
-        "an account-wide search must not send a licence filter: {query}"
+        query.contains(&format!("filter%5Blicense%5D={license_id}"))
+            || query.contains(&format!("filter[license]={license_id}")),
+        "the licence filter is mandatory: {query}"
     );
 }
 

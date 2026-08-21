@@ -248,6 +248,14 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   "already yours" would defeat the anti-seat-sharing check those scopes exist for. That is why
   `Client::activate_machine_idempotent` resolves the conflict with a licence-scoped lookup and
   re-raises the original `409` when the lookup finds nothing.
+  Scoping the lookup costs nothing, because all three strategies' `EXISTS` checks include the
+  caller's own licence rows: `UNIQUE_PER_LICENSE` matches `license_id` directly,
+  `UNIQUE_PER_POLICY` joins the licences sharing the policy (the caller's among them), and
+  `UNIQUE_PER_ACCOUNT` covers everything. A genuine re-activation therefore raises the conflict —
+  and is found by the scoped search — under all three. Widening the search adds exactly the
+  cross-licence case the wider strategies exist to refuse, and returning such a machine would have
+  the client heartbeat and check out a machine its licence does not own while its own
+  `machines_count` stayed at zero, with no `license_id` on the resource to reveal it.
 - **`policies.check_in_interval` has two lowercase spellings and only one is storable.** The
   column's `CHECK` constraint and `policies::enums::CHECK_IN_INTERVALS` admit exactly
   `daily`/`weekly`/`monthly`/`yearly`, which is what a `GET` returns. The server's own overdue

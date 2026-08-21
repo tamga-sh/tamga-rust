@@ -1506,34 +1506,40 @@ impl Client {
     /// superset, so a substring or case-folded hit on somebody else's
     /// hostname can never come back as a match.
     ///
-    /// **`license_id` decides what a hit means, and the distinction is not
-    /// cosmetic.**
+    /// **`license_id` is not optional, and widening it would be a seat-sharing
+    /// hole rather than a convenience.** It is sent as `filter[license]`, so
+    /// every row the server returns is on that licence — and that filter is
+    /// the *only* way to establish it, because
+    /// [`crate::models::machine::MachineAttributes`] carries no `license_id`
+    /// and no `relationships`; the server's machine serializer emits neither.
+    /// A machine found without it cannot be attributed to a licence at all.
     ///
-    /// - `Some(id)` sends `filter[license]`, so every row the server returns
-    ///   is on that licence. This is the only way to establish that, because
-    ///   [`crate::models::machine::MachineAttributes`] carries **no
-    ///   `license_id` and no `relationships`** — the server's machine
-    ///   serializer emits neither. A machine that arrives without the filter
-    ///   cannot be attributed to a licence at all.
-    /// - `None` searches the whole account. Use it to answer "does anything
-    ///   hold this fingerprint?" — a diagnostic — never to conclude "this
-    ///   machine is mine". Under a policy with `machine_uniqueness_strategy`
-    ///   set to `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` the answer can be
-    ///   a machine on a different licence, and nothing on the resource says
-    ///   so.
+    /// A licence-scoped search never misses a genuine re-activation. All three
+    /// `machine_uniqueness_strategy` `EXISTS` checks include the caller's own
+    /// licence rows: `UNIQUE_PER_LICENSE` matches on `license_id` directly,
+    /// `UNIQUE_PER_POLICY` joins licences sharing the policy (the caller's
+    /// among them), and `UNIQUE_PER_ACCOUNT` covers every machine in the
+    /// account. So re-activating your own machine raises
+    /// `FINGERPRINT_TAKEN` under all three and this search finds it under all
+    /// three. Widening the search adds exactly one case — a machine on
+    /// *another* licence — which is the case the wider strategies exist to
+    /// refuse.
     ///
-    /// [`Self::activate_machine_idempotent`] passes `Some`, for exactly that
-    /// reason.
+    /// For the genuinely different question "is anything in the account
+    /// holding this fingerprint?", call [`Self::list_machines`] with
+    /// [`ListMachinesOptions::search`] directly. That result is
+    /// unattributable by construction, and asking for it through the raw
+    /// listing keeps that obvious.
     pub async fn find_machine_by_fingerprint(
         &self,
-        license_id: Option<uuid::Uuid>,
+        license_id: uuid::Uuid,
         fingerprint: &str,
     ) -> Result<Option<crate::models::machine::MachineResource>, crate::TamgaError> {
         let mut page_number = 1i64;
         loop {
             let page = self
                 .list_machines(ListMachinesOptions {
-                    license_id,
+                    license_id: Some(license_id),
                     search: Some(fingerprint.to_string()),
                     page_number: Some(page_number),
                     page_size: Some(MAX_OFFSET_PAGE_SIZE),
@@ -1702,10 +1708,14 @@ impl Client {
     /// no `license_id` and no `relationships` — the server's serializer emits
     /// neither — so a machine found by an account-wide search cannot be
     /// attributed to a licence by inspecting it. `filter[license]` is where
-    /// that guarantee comes from. An account-wide search is still available
-    /// (`find_machine_by_fingerprint(None, …)`) for the diagnostic question
-    /// "is anything holding this fingerprint?", which is a different question
-    /// from "is this mine".
+    /// that guarantee comes from, and it costs nothing: all three uniqueness
+    /// strategies raise the conflict for the caller's own rows too, so a
+    /// genuine re-activation is always inside the scoped search.
+    ///
+    /// What a cross-licence hit would cost, had it been returned: the client
+    /// would heartbeat and check out a machine its licence does not own while
+    /// its own `machines_count` stayed at zero, and — carrying no
+    /// `license_id` — would have no way to notice.
     ///
     /// ⚠️ `auto_delete_on_overage` **never deletes an adopted machine.**
     /// Rolling back is only meaningful for a row this call created; deleting
@@ -1729,7 +1739,7 @@ impl Client {
             Ok(machine) => (Some(machine), false),
             Err(err) if matches!(err, crate::TamgaError::FingerprintTaken(_)) => {
                 match self
-                    .find_machine_by_fingerprint(Some(license_id), fingerprint)
+                    .find_machine_by_fingerprint(license_id, fingerprint)
                     .await?
                 {
                     Some(existing) => (Some(existing), true),
