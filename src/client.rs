@@ -914,13 +914,21 @@ impl Client {
     /// `last_heartbeat_at = now`. Returns the updated machine resource.
     ///
     /// The write is unconditional — a bare `last_heartbeat_at = NOW()` with
-    /// no resurrection check — so this call **succeeds against a machine
-    /// already reporting
-    /// [`crate::models::machine::HeartbeatStatus::Dead`], and revives it**.
-    /// Keep the timer running through `Dead` rather than tearing it down:
-    /// `Dead` only means the last ping is older than the heartbeat window,
-    /// and on the default policy (`require_heartbeat = false`) the row is
-    /// never culled at all.
+    /// no resurrection check — so it revives a machine that had gone stale
+    /// server-side, however long ago it last pinged.
+    ///
+    /// ⚠️ The returned `heartbeat_status` is never
+    /// [`crate::models::machine::HeartbeatStatus::Dead`]. The server writes
+    /// `last_heartbeat_at = NOW()` and then derives the status from that same
+    /// timestamp, so the age it measures is ~0 and the answer is always
+    /// `Alive` or `Resurrected`. `Dead` is a real state, but it is only
+    /// visible from a machine read this crate does not expose — so **do not
+    /// write a `Dead` branch against this response**, and do not read a
+    /// non-`Dead` answer as evidence the machine was never late.
+    ///
+    /// **Never stop the ping loop on a status**, whichever comes back. That
+    /// rule does not depend on seeing `Dead`, and it is what keeps a stale
+    /// machine recoverable.
     ///
     /// The row-is-gone signal is a `404`
     /// ([`crate::TamgaError::NotFound`]) from this call — that, and only

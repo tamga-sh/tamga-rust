@@ -441,15 +441,18 @@ async fn activate_machine_propagates_a_non_limit_create_failure_unchanged() {
 }
 
 #[tokio::test]
-async fn ping_heartbeat_succeeds_against_a_dead_machine_and_revives_it() {
-    // `DEAD` reports staleness, not deletion. The server computes it from
-    // `last_heartbeat_at` vs the window without consulting
-    // `policy.require_heartbeat`, while the cull job refuses to touch a
-    // machine unless that flag is set — and it defaults to FALSE. So on a
-    // default policy the row outlives `DEAD` indefinitely, and the ping (a
-    // bare `SET last_heartbeat_at = NOW()`, no resurrection check) still
-    // lands. A scheduler must keep pinging through `DEAD` rather than
-    // treating it as a cue to re-activate.
+async fn ping_heartbeat_against_a_stale_machine_returns_resurrected() {
+    // A machine that stopped pinging goes `DEAD` server-side, but a ping
+    // still lands (bare `SET last_heartbeat_at = NOW()`, no resurrection
+    // check) and revives it. `RESURRECTED` is what the server really answers
+    // here, and mocking that is the point: the ping writes the timestamp and
+    // then derives the status from it, so its age is ~0 and `DEAD` is not a
+    // response this route can produce. Nothing this crate calls can surface
+    // `DEAD` at all — it needs a machine read, which is not exposed yet.
+    //
+    // The property under test is that the client accepts the revival answer
+    // and does not treat a status change as a failure. Never stop a ping loop
+    // on a status; only the 404 below is terminal.
     let mock_server = MockServer::start().await;
     let machine_id = uuid::Uuid::nil();
 
@@ -468,7 +471,7 @@ async fn ping_heartbeat_succeeds_against_a_dead_machine_and_revives_it() {
     let machine = client
         .ping_heartbeat(machine_id)
         .await
-        .expect("pinging a DEAD machine must succeed, not fail");
+        .expect("pinging a stale machine must succeed, not fail");
     assert_eq!(
         machine.attributes.heartbeat_status,
         HeartbeatStatus::Resurrected
@@ -477,7 +480,9 @@ async fn ping_heartbeat_succeeds_against_a_dead_machine_and_revives_it() {
 
 #[tokio::test]
 async fn ping_heartbeat_404_is_the_only_row_is_gone_signal() {
-    // Re-activation hangs off this, not off `HeartbeatStatus::Dead`.
+    // Re-activation hangs off this, not off any `heartbeat_status` value —
+    // `HeartbeatStatus::Dead` never arrives on this route (see above), so a
+    // 404 is the only terminal signal a ping loop can act on.
     let mock_server = MockServer::start().await;
     let machine_id = uuid::Uuid::nil();
 

@@ -16,10 +16,12 @@
 //!   policy the caller must pick the ping interval itself. `DEAD` means
 //!   **only** "the last ping is older than that window" — it is not a
 //!   tombstone. Under the default policy (`require_heartbeat = false`)
-//!   nothing is ever culled, so a machine can report `DEAD` indefinitely
-//!   with its row and its seat still in place. Keep pinging through `DEAD`;
-//!   the ping succeeds and revives the machine. A `404` from the ping is the
-//!   only row-is-gone signal.
+//!   nothing is ever culled, so a machine stays `DEAD` indefinitely with its
+//!   row and its seat still in place. `DEAD` is also **not observable from
+//!   any route this crate calls** — a ping answers `ALIVE`/`RESURRECTED` by
+//!   construction, reset and create answer `NOT_STARTED`, and seeing it needs
+//!   a machine read this crate does not expose. Never stop the ping loop on a
+//!   status; a `404` from the ping is the only terminal signal.
 //! - `ComponentResource`: `machine_id`, `fingerprint`, `name`, `metadata`.
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
@@ -69,6 +71,11 @@ pub struct MachineAttributes {
     /// Optional display name.
     pub name: Option<String>,
     /// Machine heartbeat state — see [`HeartbeatStatus`].
+    ///
+    /// On responses reachable from this crate this is only ever
+    /// `NotStarted`, `Alive` or `Resurrected`; `Dead` requires a machine read
+    /// that is not exposed here. Match exhaustively anyway — the set widens
+    /// the moment one lands.
     pub heartbeat_status: HeartbeatStatus,
     /// Timestamp of the last `ping-heartbeat` call.
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -117,15 +124,31 @@ pub struct MachineAttributes {
 /// `policy.require_heartbeat` on the way, but the cull job that would
 /// actually remove the row bails out unless `require_heartbeat` is set — and
 /// that column defaults to `false`. On a default policy nothing is ever
-/// culled, so a machine reports `Dead` **forever** while its row, and the
-/// seat it holds against the licence, are still there.
+/// culled, so a machine stays `Dead` **forever** while its row, and the seat
+/// it holds against the licence, are still there.
 ///
-/// A scheduler must therefore **keep pinging through `Dead`**.
-/// [`crate::Client::ping_heartbeat`] is a bare `last_heartbeat_at = NOW()`
-/// write with no resurrection check, so it succeeds against a `Dead` machine
-/// and revives it. The row-is-gone signal is a `404`
-/// ([`crate::TamgaError::NotFound`]) from the ping itself — hang
-/// re-activation off that, never off `Dead`.
+/// ⚠️ **`Dead` cannot be observed from any route this crate calls.** On every
+/// machine-returning endpoint here, `Dead` is impossible by construction:
+/// `ping-heartbeat` writes `last_heartbeat_at = NOW()` and *then* derives the
+/// status from that same timestamp, so its age is ~0 and the answer is always
+/// `Alive` or `Resurrected`; `reset-heartbeat` nulls the column and answers
+/// `NotStarted`; `POST /machines` never sets it and answers `NotStarted`.
+/// The licence `validate` path never constructs
+/// [`crate::models::validation::ValidationCode::HeartbeatDead`] either.
+/// `Dead` is a real server state — it is simply only visible from a machine
+/// **read** (`GET /machines/{id}` or the machine list), which this crate does
+/// not expose. It becomes reachable when a machine-read method lands; the
+/// variant stays because it is part of the wire model.
+///
+/// The scheduling rule survives that correction unchanged, and does not
+/// depend on it: **never stop the ping loop on a status**, whichever one
+/// comes back. [`crate::Client::ping_heartbeat`] is a bare
+/// `last_heartbeat_at = NOW()` write with no resurrection check, so it
+/// revives a machine that had gone stale — which is exactly why a `Dead`
+/// machine is worth pinging even though you will never see it labelled that
+/// way from here. The only terminal signal from a ping is a `404`
+/// ([`crate::TamgaError::NotFound`]): the row is gone. Hang re-activation off
+/// that, never off a status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatStatus {
     /// Never pinged.
@@ -134,11 +157,19 @@ pub enum HeartbeatStatus {
     /// else the 600s fallback. See the type-level doc.
     Alive,
     /// Window elapsed since the last ping — and nothing more. Says nothing
-    /// about whether the row still exists; see the type-level doc.
+    /// about whether the row still exists.
+    ///
+    /// Not reachable from any call this crate makes today: it needs a machine
+    /// read, which is not exposed here. Kept because it is part of the wire
+    /// model and goes live with one. See the type-level doc.
     Dead,
     /// Was `Dead`, but a new ping arrived within the policy's resurrection
     /// grace period — see
     /// [`crate::models::policy::HeartbeatResurrectionStrategy`].
+    ///
+    /// Together with `Alive` this is what [`crate::Client::ping_heartbeat`]
+    /// actually returns: it is how the revival of a stale machine surfaces
+    /// here, since `Dead` itself never appears on that route.
     Resurrected,
     /// Any wire value not matching a known variant — lenient
     /// deserialization for forward-compatibility.

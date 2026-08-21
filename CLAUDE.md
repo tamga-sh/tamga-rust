@@ -148,10 +148,19 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   `require_heartbeat`, while the cull job early-returns on `!policy.require_heartbeat` and its
   claim query filters on `AND p.require_heartbeat`. That column is `NOT NULL DEFAULT FALSE`, so on
   a default policy **nothing is ever culled**: a machine reports `DEAD` forever with its row, and
-  the seat it holds against the licence, still in place. Pinging a `DEAD` machine succeeds and
-  revives it — the update is a bare `SET last_heartbeat_at = NOW()` with no resurrection check — so
-  a scheduler must ping *through* `DEAD` instead of stopping and re-activating on it. The only real
-  row-is-gone signal is a `404 NOT_FOUND` from the ping itself; hang re-activation off that.
+  the seat it holds against the licence, still in place. Pinging such a machine revives it — the
+  update is a bare `SET last_heartbeat_at = NOW()` with no resurrection check.
+- **…but `DEAD` is not observable from any route this SDK calls, so do not frame the rule around
+  seeing it.** `ping-heartbeat` writes `last_heartbeat_at = NOW()` and then computes the status
+  from that same timestamp (`heartbeat_status_within`, `machines/model.rs:124-146`), so the age is
+  ~0 and it answers `ALIVE`/`RESURRECTED` every time; `reset-heartbeat` nulls the column and answers
+  `NOT_STARTED`; `POST /machines` never sets it and answers `NOT_STARTED`; and `validate` never
+  constructs `HEARTBEAT_DEAD` (zero hits in `validate_license.rs`). `DEAD` is real but only visible
+  from a machine read — `GET /machines/{id}` or the list — which this crate does not expose (M11 /
+  M36, a later turn). Consequences: **never stop the ping loop on a status** (the rule stands and
+  never needed `DEAD` to justify it), the only terminal signal is a `404 NOT_FOUND`, and no
+  `DEAD` branch should be written against a ping response. Keep the enum variant and the field —
+  both are wire model and go live with a machine read.
 - **Processes are never reaped — a registered process leaks its slot.** `process_process_heartbeat`
   and `find_and_claim_dead_processes` implement the 30s window and the delete-on-expiry sweep, but
   a `grep` over the server tree finds two hits for each: their own definitions, and no call sites.

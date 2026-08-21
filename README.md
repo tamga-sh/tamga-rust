@@ -237,10 +237,16 @@ stayed cryptographically valid forever.
 - `HeartbeatStatus::Dead` means only "the last ping is older than the heartbeat
   window" — never "the machine was removed". The cull job runs only for
   policies with `require_heartbeat` set, and that column defaults to off, so a
-  machine can report `DEAD` indefinitely while its row and its seat survive.
-  `Client::ping_heartbeat` succeeds against a `DEAD` machine and revives it, so
-  a scheduler should keep pinging through `DEAD`; treat a `404` from the ping —
-  not the status — as the signal to re-activate
+  machine stays `DEAD` indefinitely while its row and its seat survive, and
+  `Client::ping_heartbeat` revives it.
+- `HeartbeatStatus::Dead` is not observable through this crate. A ping writes
+  `last_heartbeat_at = now` and derives the status from that same timestamp, so
+  it always answers `Alive` or `Resurrected`; reset and create answer
+  `NotStarted`; and validate never returns `HEARTBEAT_DEAD`. Seeing `Dead`
+  requires a machine read, which is not exposed yet — so do not branch on it
+  against a ping response. Never stop the ping loop on a status; a `404` from
+  the ping is the only terminal signal and the cue to re-activate. The variant
+  stays in the wire model and becomes reachable when a machine read lands
   (`src/models/machine.rs::HeartbeatStatus`).
 - The machine heartbeat window is set by `policy.heartbeat_duration`; 600s is
   only the fallback used when that column is null. This crate cannot read it —
