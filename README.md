@@ -239,21 +239,25 @@ stayed cryptographically valid forever.
   policies with `require_heartbeat` set, and that column defaults to off, so a
   machine stays `DEAD` indefinitely while its row and its seat survive, and
   `Client::ping_heartbeat` revives it.
-- `HeartbeatStatus::Dead` is not observable through this crate. A ping writes
-  `last_heartbeat_at = now` and derives the status from that same timestamp, so
-  it always answers `Alive` or `Resurrected`; reset and create answer
-  `NotStarted`; and validate never returns `HEARTBEAT_DEAD`. Seeing `Dead`
-  requires a machine read, which is not exposed yet — so do not branch on it
-  against a ping response. Never stop the ping loop on a status; a `404` from
-  the ping is the only terminal signal and the cue to re-activate. The variant
-  stays in the wire model and becomes reachable when a machine read lands
+- `HeartbeatStatus::Dead` never arrives on a ping, reset or create response. A
+  ping writes `last_heartbeat_at = now` and derives the status from that same
+  timestamp, so it always answers `Alive` or `Resurrected`; reset and create
+  answer `NotStarted`; and validate never returns `HEARTBEAT_DEAD`. It *does*
+  arrive on the checkout path: the machine embedded in a `.mach` file, and the
+  one returned by `Client::generate_offline_proof`, are both read from the row
+  rather than echoed from a write, so their `heartbeat_status` is a real
+  staleness verdict and can be `Dead`. Branch on it there, not against a ping.
+  Never stop the ping loop on a status; a `404` from the ping is the only
+  terminal signal and the cue to re-activate
   (`src/models/machine.rs::HeartbeatStatus`).
 - The machine heartbeat window is set by `policy.heartbeat_duration`; 600s is
-  only the fallback used when that column is null. This crate cannot read it —
-  there is no `get_policy` or `get_machine`, and the licence resource carries no
-  policy relationship — so it assumes 600s throughout. `next_heartbeat_at` on
-  the create/ping/reset responses is computed against the same fallback and will
-  not reveal a shorter window either. Under a policy that sets one, choose the
+  only the fallback used when that column is null. There is no `get_policy` or
+  `get_machine` to read it directly, and `next_heartbeat_at` on the
+  create/ping/reset responses is computed against the fallback, so it will not
+  reveal a shorter window. A verified machine file or a
+  `Client::generate_offline_proof` response will: both resolve through a
+  policy-joined read, so `next_heartbeat_at - last_heartbeat_at` there is the
+  real window. Failing that, choose the
   ping interval yourself from out-of-band knowledge of the policy, or machines
   will go `DEAD` while the client believes it is pinging often enough
   (`src/models/machine.rs::HeartbeatStatus`).

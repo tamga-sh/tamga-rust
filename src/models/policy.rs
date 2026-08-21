@@ -524,11 +524,14 @@ pub struct PolicyAttributes {
     /// and the cull job's claim query selects on
     /// `COALESCE(p.heartbeat_duration, 600)`.
     ///
-    /// ⚠️ Knowing that does not help a caller here, because nothing in this
-    /// crate can fetch a [`Policy`]: there is no `get_policy`, and the
-    /// licence resource carries no policy relationship. This crate therefore
-    /// assumes the 600s fallback everywhere, which is wrong under any policy
-    /// that sets this field lower. Learn the value out of band — from
+    /// ⚠️ Nothing in this crate can fetch a [`Policy`] to read it directly:
+    /// there is no `get_policy`, and the licence resource carries no policy
+    /// relationship. The value is still observable indirectly — machine
+    /// checkout and offline proof resolve through a policy-joined read, so
+    /// `next_heartbeat_at - last_heartbeat_at` on a verified machine file or
+    /// a proof response is the effective window. The write responses (create,
+    /// ping-heartbeat, reset-heartbeat) carry the 600s fallback instead and
+    /// will not reveal it. Failing either, learn the value out of band — from
     /// whoever provisions the policy — and set the ping interval explicitly.
     /// See [`crate::models::machine::HeartbeatStatus`]'s doc comment.
     ///

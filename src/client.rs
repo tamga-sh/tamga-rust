@@ -921,10 +921,12 @@ impl Client {
     /// [`crate::models::machine::HeartbeatStatus::Dead`]. The server writes
     /// `last_heartbeat_at = NOW()` and then derives the status from that same
     /// timestamp, so the age it measures is ~0 and the answer is always
-    /// `Alive` or `Resurrected`. `Dead` is a real state, but it is only
-    /// visible from a machine read this crate does not expose — so **do not
-    /// write a `Dead` branch against this response**, and do not read a
-    /// non-`Dead` answer as evidence the machine was never late.
+    /// `Alive` or `Resurrected`. `Dead` is a real state, and it *is* visible
+    /// from this crate — inside a verified machine file and on a
+    /// [`Self::generate_offline_proof`] response, both built from a read —
+    /// just never here. So **do not write a `Dead` branch against this
+    /// response**, and do not read a non-`Dead` answer as evidence the
+    /// machine was never late.
     ///
     /// **Never stop the ping loop on a status**, whichever comes back. That
     /// rule does not depend on seeing `Dead`, and it is what keeps a stale
@@ -936,11 +938,13 @@ impl Client {
     ///
     /// ⚠️ Pick the interval deliberately. The server's window is
     /// `policy.heartbeat_duration` and falls back to 600s only when unset,
-    /// but this crate cannot read a policy and the `next_heartbeat_at` on the
-    /// response is computed against that 600s fallback regardless — see
-    /// [`crate::models::machine::HeartbeatStatus`]. A tighter policy needs a
-    /// tighter interval, and only out-of-band knowledge of the policy will
-    /// tell you so.
+    /// and the `next_heartbeat_at` on *this* response is computed against
+    /// that fallback regardless — so it cannot tell you a tighter policy
+    /// needs a tighter interval. A checked-out machine file or a
+    /// [`Self::generate_offline_proof`] response can: both resolve through a
+    /// policy-joined read, so `next_heartbeat_at - last_heartbeat_at` there
+    /// is the real window. See
+    /// [`crate::models::machine::HeartbeatStatus`].
     pub async fn ping_heartbeat(
         &self,
         machine_id: uuid::Uuid,

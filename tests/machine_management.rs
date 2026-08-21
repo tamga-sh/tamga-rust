@@ -447,8 +447,10 @@ async fn ping_heartbeat_against_a_stale_machine_returns_resurrected() {
     // check) and revives it. `RESURRECTED` is what the server really answers
     // here, and mocking that is the point: the ping writes the timestamp and
     // then derives the status from it, so its age is ~0 and `DEAD` is not a
-    // response this route can produce. Nothing this crate calls can surface
-    // `DEAD` at all — it needs a machine read, which is not exposed yet.
+    // response this route can produce. `DEAD` does reach this crate, just not
+    // here: the machine inside a verified `.mach` file, and the one on a
+    // `generate_offline_proof` response, are read from the row rather than
+    // echoed from a write, so either can carry it.
     //
     // The property under test is that the client accepts the revival answer
     // and does not treat a status change as a failure. Never stop a ping loop

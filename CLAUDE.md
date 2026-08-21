@@ -150,17 +150,21 @@ Logs/SSO, Auto-Update) is out of scope for this SDK entirely.
   a default policy **nothing is ever culled**: a machine reports `DEAD` forever with its row, and
   the seat it holds against the licence, still in place. Pinging such a machine revives it — the
   update is a bare `SET last_heartbeat_at = NOW()` with no resurrection check.
-- **…but `DEAD` is not observable from any route this SDK calls, so do not frame the rule around
-  seeing it.** `ping-heartbeat` writes `last_heartbeat_at = NOW()` and then computes the status
-  from that same timestamp (`heartbeat_status_within`, `machines/model.rs:124-146`), so the age is
-  ~0 and it answers `ALIVE`/`RESURRECTED` every time; `reset-heartbeat` nulls the column and answers
+- **…but no *ping* can report `DEAD`, so do not frame the rule around seeing it there.**
+  `ping-heartbeat` writes `last_heartbeat_at = NOW()` and then computes the status from that same
+  timestamp (`heartbeat_status_within`, `machines/model.rs:124-146`), so the age is ~0 and it
+  answers `ALIVE`/`RESURRECTED` every time; `reset-heartbeat` nulls the column and answers
   `NOT_STARTED`; `POST /machines` never sets it and answers `NOT_STARTED`; and `validate` never
-  constructs `HEARTBEAT_DEAD` (zero hits in `validate_license.rs`). `DEAD` is real but only visible
-  from a machine read — `GET /machines/{id}` or the list — which this crate does not expose (M11 /
-  M36, a later turn). Consequences: **never stop the ping loop on a status** (the rule stands and
-  never needed `DEAD` to justify it), the only terminal signal is a `404 NOT_FOUND`, and no
-  `DEAD` branch should be written against a ping response. Keep the enum variant and the field —
-  both are wire model and go live with a machine read.
+  constructs `HEARTBEAT_DEAD` (zero hits in `validate_license.rs`). **Checkout is the exception and
+  `DEAD` is genuinely reachable there:** `check_out_machine.rs:114` and
+  `generate_offline_proof.rs:38` both resolve via `queries::find_by_id` — a policy-joined read of a
+  row nobody just wrote — then serialize with `MachineResource::from`. In this crate
+  `verify_machine_file` returns a `MachineResource`, and `Client::generate_offline_proof` returns
+  one directly, so both surface `heartbeat_status` and it can be `DEAD`. Consequences: **never stop
+  the ping loop on a status** (the rule stands and never needed `DEAD` to justify it), the only
+  terminal signal is a `404 NOT_FOUND`, and no `DEAD` branch belongs against a *ping* response —
+  put it on the checkout path instead. `GET /machines/{id}` and the list would carry it too;
+  neither is exposed yet (M11 / M36).
 - **Processes are never reaped — a registered process leaks its slot.** `process_process_heartbeat`
   and `find_and_claim_dead_processes` implement the 30s window and the delete-on-expiry sweep, but
   a `grep` over the server tree finds two hits for each: their own definitions, and no call sites.

@@ -11,17 +11,16 @@
 //!   totals and the `MEMORY_LIMIT_EXCEEDED`/`DISK_LIMIT_EXCEEDED` checks.
 //! - `HeartbeatStatus`: `NOT_STARTED` → `ALIVE` → `DEAD` → `RESURRECTED`.
 //!   The server's window **is** `policy.heartbeat_duration`, falling back to
-//!   600s (10 min) only when that column is null — but this crate cannot read
-//!   it and assumes the 600s fallback throughout, so on a shorter-window
-//!   policy the caller must pick the ping interval itself. `DEAD` means
-//!   **only** "the last ping is older than that window" — it is not a
-//!   tombstone. Under the default policy (`require_heartbeat = false`)
-//!   nothing is ever culled, so a machine stays `DEAD` indefinitely with its
-//!   row and its seat still in place. `DEAD` is also **not observable from
-//!   any route this crate calls** — a ping answers `ALIVE`/`RESURRECTED` by
-//!   construction, reset and create answer `NOT_STARTED`, and seeing it needs
-//!   a machine read this crate does not expose. Never stop the ping loop on a
-//!   status; a `404` from the ping is the only terminal signal.
+//!   600s (10 min) only when that column is null; the write responses carry
+//!   the fallback, so on a shorter-window policy the caller must pick the
+//!   ping interval itself. `DEAD` means **only** "the last ping is older than
+//!   that window" — it is not a tombstone. Under the default policy
+//!   (`require_heartbeat = false`) nothing is ever culled, so a machine stays
+//!   `DEAD` indefinitely with its row and its seat still in place. A ping,
+//!   reset or create response can never *say* `DEAD` — but a verified machine
+//!   file or an offline-proof response can, since both are built from a read.
+//!   Never stop the ping loop on a status; a `404` from the ping is the only
+//!   terminal signal.
 //! - `ComponentResource`: `machine_id`, `fingerprint`, `name`, `metadata`.
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
@@ -72,20 +71,23 @@ pub struct MachineAttributes {
     pub name: Option<String>,
     /// Machine heartbeat state — see [`HeartbeatStatus`].
     ///
-    /// On responses reachable from this crate this is only ever
-    /// `NotStarted`, `Alive` or `Resurrected`; `Dead` requires a machine read
-    /// that is not exposed here. Match exhaustively anyway — the set widens
-    /// the moment one lands.
+    /// On the write responses (create, ping-heartbeat, reset-heartbeat) this
+    /// is only ever `NotStarted`, `Alive` or `Resurrected`. Inside a verified
+    /// machine file, or on a [`crate::Client::generate_offline_proof`]
+    /// response, it is a real staleness verdict and **can be `Dead`**. Match
+    /// exhaustively either way.
     pub heartbeat_status: HeartbeatStatus,
     /// Timestamp of the last `ping-heartbeat` call.
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Server-computed next-expected-heartbeat deadline, if derivable.
     ///
-    /// ⚠️ Not a reliable source for the policy's real heartbeat window. The
-    /// server computes it from the window carried on the row, and the create,
-    /// ping-heartbeat and reset-heartbeat queries — the only machine
-    /// responses this crate can reach — do not join the policy, so this is
-    /// `last_heartbeat_at + 600s` even under a policy that asks for less.
+    /// ⚠️ Which window this reflects depends on the route. The create,
+    /// ping-heartbeat and reset-heartbeat queries do not join the policy, so
+    /// there this is `last_heartbeat_at + 600s` even under a policy that asks
+    /// for less — not a usable source for the real window. Machine checkout
+    /// and offline proof resolve through a policy-joined read, so there it is
+    /// the genuine deadline and `next_heartbeat_at - last_heartbeat_at`
+    /// recovers the effective window.
     pub next_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Timestamp of the last machine-file checkout.
     pub last_check_out_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -100,24 +102,28 @@ pub struct MachineAttributes {
 /// Machine heartbeat state machine: `NotStarted` → `Alive` → `Dead` →
 /// `Resurrected`.
 ///
-/// ⚠️ **The window is policy-driven, and this crate cannot discover it.**
-/// Server-side it is `policy.heartbeat_duration`, with 600s (10 min) used
-/// only as the fallback when that column is null: `effective_window_secs`
-/// prefers the policy value, and the cull job's claim query selects on
-/// `COALESCE(p.heartbeat_duration, 600)`. Nothing in this crate reads it —
-/// there is no `get_policy` and no `get_machine` — so every interval this
-/// crate's documentation suggests is computed against the 600s fallback.
+/// ⚠️ **The window is policy-driven.** Server-side it is
+/// `policy.heartbeat_duration`, with 600s (10 min) used only as the fallback
+/// when that column is null: `effective_window_secs` prefers the policy
+/// value, and the cull job's claim query selects on
+/// `COALESCE(p.heartbeat_duration, 600)`. There is no `get_policy` and no
+/// `get_machine` here, so the window cannot be read directly.
 ///
-/// Do not try to recover the real window from `next_heartbeat_at` either.
-/// The server derives that field from the window carried on the row, and the
-/// policy join is present only on the read queries this crate exposes no
-/// route for; the create, ping-heartbeat and reset-heartbeat paths all omit
-/// it, so on every machine response reachable from here `next_heartbeat_at`
-/// is `last_heartbeat_at + 600s` whatever the policy actually says. **On a
-/// policy with a shorter window, a caller pinging on the 600s assumption
-/// pings far too slowly and its machines go `Dead` on schedule.** Learn the
-/// window out of band — from whoever provisions the policy — and set the
-/// interval explicitly.
+/// It also cannot be recovered from a **write** response. The create,
+/// ping-heartbeat and reset-heartbeat queries omit the policy join, so
+/// `next_heartbeat_at` on those is `last_heartbeat_at + 600s` whatever the
+/// policy says — never derive an interval from a ping.
+///
+/// The **read** paths do carry it. [`crate::Client::check_out_machine`] and
+/// [`crate::Client::generate_offline_proof`] resolve the machine through a
+/// policy-joined query, so on a verified machine file (see
+/// [`crate::checkout::machine_file::verify_machine_file`]) or a proof
+/// response, `next_heartbeat_at - last_heartbeat_at` is the real effective
+/// window — the one place this crate can observe it, and only when
+/// `last_heartbeat_at` is set. Otherwise learn it out of band, from whoever
+/// provisions the policy, and set the interval explicitly. **On a policy with
+/// a shorter window, a caller pinging on the 600s assumption pings far too
+/// slowly and its machines go `Dead` on schedule.**
 ///
 /// ⚠️ **`Dead` is a staleness report, not a tombstone.** The server computes
 /// it purely from `last_heartbeat_at` versus the window and never consults
@@ -127,28 +133,33 @@ pub struct MachineAttributes {
 /// culled, so a machine stays `Dead` **forever** while its row, and the seat
 /// it holds against the licence, are still there.
 ///
-/// ⚠️ **`Dead` cannot be observed from any route this crate calls.** On every
-/// machine-returning endpoint here, `Dead` is impossible by construction:
-/// `ping-heartbeat` writes `last_heartbeat_at = NOW()` and *then* derives the
-/// status from that same timestamp, so its age is ~0 and the answer is always
-/// `Alive` or `Resurrected`; `reset-heartbeat` nulls the column and answers
-/// `NotStarted`; `POST /machines` never sets it and answers `NotStarted`.
-/// The licence `validate` path never constructs
+/// ⚠️ **A ping, reset, create or validate response can never say `Dead` — a
+/// checked-out machine file can.** The write paths are `Dead`-free by
+/// construction: `ping-heartbeat` writes `last_heartbeat_at = NOW()` and
+/// *then* derives the status from that same timestamp, so its age is ~0 and
+/// the answer is always `Alive` or `Resurrected`; `reset-heartbeat` nulls the
+/// column and answers `NotStarted`; `POST /machines` never sets it and
+/// answers `NotStarted`. The licence `validate` path never constructs
 /// [`crate::models::validation::ValidationCode::HeartbeatDead`] either.
-/// `Dead` is a real server state — it is simply only visible from a machine
-/// **read** (`GET /machines/{id}` or the machine list), which this crate does
-/// not expose. It becomes reachable when a machine-read method lands; the
-/// variant stays because it is part of the wire model.
 ///
-/// The scheduling rule survives that correction unchanged, and does not
-/// depend on it: **never stop the ping loop on a status**, whichever one
-/// comes back. [`crate::Client::ping_heartbeat`] is a bare
-/// `last_heartbeat_at = NOW()` write with no resurrection check, so it
-/// revives a machine that had gone stale — which is exactly why a `Dead`
-/// machine is worth pinging even though you will never see it labelled that
-/// way from here. The only terminal signal from a ping is a `404`
-/// ([`crate::TamgaError::NotFound`]): the row is gone. Hang re-activation off
-/// that, never off a status.
+/// Checkout is the exception, and it is a genuine staleness verdict: the
+/// server resolves the machine through a read query nobody has just written
+/// to, then serializes it into the file.
+/// [`crate::checkout::machine_file::verify_machine_file`] returns a
+/// [`MachineResource`], so the `heartbeat_status` inside a verified
+/// `.machine` file **can be `Dead`** — as can the one on the
+/// [`crate::Client::generate_offline_proof`] response, which resolves the
+/// same way. Those are the places to look for it. `GET /machines/{id}` and
+/// the machine list would carry it too; neither is exposed here yet.
+///
+/// The scheduling rule does not depend on any of that: **never stop the ping
+/// loop on a status**, whichever one comes back.
+/// [`crate::Client::ping_heartbeat`] is a bare `last_heartbeat_at = NOW()`
+/// write with no resurrection check, so it revives a machine that had gone
+/// stale — which is why a `Dead` machine is worth pinging even though the
+/// ping itself will never label it that way. The only terminal signal from a
+/// ping is a `404` ([`crate::TamgaError::NotFound`]): the row is gone. Hang
+/// re-activation off that, never off a status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatStatus {
     /// Never pinged.
@@ -159,9 +170,9 @@ pub enum HeartbeatStatus {
     /// Window elapsed since the last ping — and nothing more. Says nothing
     /// about whether the row still exists.
     ///
-    /// Not reachable from any call this crate makes today: it needs a machine
-    /// read, which is not exposed here. Kept because it is part of the wire
-    /// model and goes live with one. See the type-level doc.
+    /// Never arrives on a ping, reset or create response; it does arrive
+    /// inside a verified machine file and on an offline-proof response, both
+    /// of which the server builds from a read. See the type-level doc.
     Dead,
     /// Was `Dead`, but a new ping arrived within the policy's resurrection
     /// grace period — see

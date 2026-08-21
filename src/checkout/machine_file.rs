@@ -113,6 +113,14 @@ fn scheme_alg_suffix(scheme: crate::models::policy::LicenseScheme) -> &'static s
 /// [`crate::models::machine::MachineResource`] once the signature (and
 /// decryption, if encrypted) has checked out.
 ///
+/// The embedded resource is a **read** of the machine row taken at checkout
+/// time, not the echo of a write, and the server resolves it through a
+/// policy-joined query. Two consequences worth knowing: its
+/// `heartbeat_status` is a genuine staleness verdict and **can be
+/// [`crate::models::machine::HeartbeatStatus::Dead`]** — the ping, reset and
+/// create responses never can — and its `next_heartbeat_at` reflects the
+/// policy's real window rather than the 600s fallback those responses carry.
+///
 /// `scheme` **must** come from the license's own `scheme` field (via
 /// whatever license resource governs this machine) — never from parsing
 /// the file's `alg` string, which cannot safely disambiguate
