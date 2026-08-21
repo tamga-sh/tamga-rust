@@ -12,15 +12,15 @@
 //! - `HeartbeatStatus`: `NOT_STARTED` → `ALIVE` → `DEAD` → `RESURRECTED`.
 //!   The server's window **is** `policy.heartbeat_duration`, falling back to
 //!   600s (10 min) only when that column is null; the write responses carry
-//!   the fallback, so on a shorter-window policy the caller must pick the
-//!   ping interval itself. `DEAD` means **only** "the last ping is older than
-//!   that window" — it is not a tombstone. Under the default policy
-//!   (`require_heartbeat = false`) nothing is ever culled, so a machine stays
-//!   `DEAD` indefinitely with its row and its seat still in place. A ping,
-//!   reset or create response can never *say* `DEAD` — but a verified machine
-//!   file or an offline-proof response can, since both are built from a read.
-//!   Never stop the ping loop on a status; a `404` from the ping is the only
-//!   terminal signal.
+//!   the fallback, so read the real one with
+//!   [`crate::Client::effective_heartbeat_window`]. `DEAD` means **only**
+//!   "the last ping is older than that window" — it is not a tombstone. Under
+//!   the default policy (`require_heartbeat = false`) nothing is ever culled,
+//!   so a machine stays `DEAD` indefinitely with its row and its seat still
+//!   in place. A ping, reset or create response can never *say* `DEAD` — a
+//!   response built from a read can: a verified machine file, an offline
+//!   proof, `get_machine`, `list_machines`. Never stop the ping loop on a
+//!   status; a `404` from the ping is the only terminal signal.
 //! - `ComponentResource`: `machine_id`, `fingerprint`, `name`, `metadata`.
 //! - `ProcessResource`: `machine_id`, `pid`, `metadata`.
 //! - `Pid` newtype: the wire format is a **string, not an integer** —
@@ -28,7 +28,8 @@
 //!   holding a native numeric PID don't have to hand-format it. The 30s
 //!   process heartbeat window exists only in a worker the server never
 //!   runs: **no process row is ever reaped**, so a leaked process holds its
-//!   slot against `max_processes` until a client deletes it explicitly.
+//!   slot against `max_processes` until a client deletes it explicitly with
+//!   [`crate::Client::delete_process`].
 
 /// The `machines` JSON:API resource: `{ id, type, attributes }`. Field set
 /// matches the Tamga API's actual `MachineResource`/`MachineAttributes`
@@ -99,6 +100,36 @@ pub struct MachineAttributes {
     pub updated: chrono::DateTime<chrono::Utc>,
 }
 
+impl MachineAttributes {
+    /// The heartbeat window this response was judged against, recovered as
+    /// `next_heartbeat_at - last_heartbeat_at`, or `None` when either
+    /// timestamp is absent.
+    ///
+    /// ⚠️ **Only trustworthy on a response the server built from a read.**
+    /// `next_heartbeat_at` is derived from `Machine::effective_window_secs()`,
+    /// which reads a `policy_heartbeat_duration` column populated only when
+    /// the query joined `policies`. Which endpoint answered therefore decides
+    /// what this returns:
+    ///
+    /// | Endpoint | This returns |
+    /// |---|---|
+    /// | [`crate::Client::get_machine`], [`crate::Client::list_machines`] | the real `policy.heartbeat_duration` |
+    /// | [`crate::Client::check_out_machine`], [`crate::Client::generate_offline_proof`] | the real `policy.heartbeat_duration` |
+    /// | [`crate::Client::create_machine`], [`crate::Client::ping_heartbeat`], [`crate::Client::reset_heartbeat`] | the 600s **fallback**, whatever the policy says |
+    ///
+    /// Nothing on the response distinguishes the two, which is why this is a
+    /// method on the attributes rather than a field: the caller has to know
+    /// which route produced it. Reported upstream as `tamga-api-internal#7`.
+    ///
+    /// [`crate::Client::effective_heartbeat_window`] avoids the question
+    /// entirely by reading the policy.
+    pub fn observed_heartbeat_window(&self) -> Option<std::time::Duration> {
+        let last = self.last_heartbeat_at?;
+        let next = self.next_heartbeat_at?;
+        (next - last).to_std().ok()
+    }
+}
+
 /// Machine heartbeat state machine: `NotStarted` → `Alive` → `Dead` →
 /// `Resurrected`.
 ///
@@ -106,8 +137,9 @@ pub struct MachineAttributes {
 /// `policy.heartbeat_duration`, with 600s (10 min) used only as the fallback
 /// when that column is null: `effective_window_secs` prefers the policy
 /// value, and the cull job's claim query selects on
-/// `COALESCE(p.heartbeat_duration, 600)`. There is no `get_policy` and no
-/// `get_machine` here, so the window cannot be read directly.
+/// `COALESCE(p.heartbeat_duration, 600)`. Read it with
+/// [`crate::Client::effective_heartbeat_window`], which fetches the licence's
+/// policy — a single call at startup, not once per tick.
 ///
 /// It also cannot be recovered from a **write** response. The create,
 /// ping-heartbeat and reset-heartbeat queries omit the policy join, so
@@ -149,8 +181,11 @@ pub struct MachineAttributes {
 /// [`MachineResource`], so the `heartbeat_status` inside a verified
 /// `.machine` file **can be `Dead`** — as can the one on the
 /// [`crate::Client::generate_offline_proof`] response, which resolves the
-/// same way. Those are the places to look for it. `GET /machines/{id}` and
-/// the machine list would carry it too; neither is exposed here yet.
+/// same way. [`crate::Client::get_machine`] and
+/// [`crate::Client::list_machines`] carry it too, and for the same reason:
+/// both resolve through a policy-joined read nobody has just written to. A
+/// `Dead` branch against any of those four is live code; against a ping,
+/// reset or create response it is unreachable.
 ///
 /// The scheduling rule does not depend on any of that: **never stop the ping
 /// loop on a status**, whichever one comes back.
@@ -331,10 +366,10 @@ pub struct ProcessAttributes {
 /// by [`crate::Client::create_process`] increments the licence's
 /// `machines_process_count` and holds that slot against the policy's
 /// `max_processes` **forever**, however long ago it stopped pinging. Only an
-/// explicit delete releases it, and this crate exposes no method for that
-/// today, so a caller here has no way to release the slot — track it as a
-/// gap, and register only what is worth tracking. Keeping a PID stable across
-/// restarts at least bounds the damage: re-registering the same one is
+/// explicit delete releases it: [`crate::Client::delete_process`], or
+/// [`crate::Client::delete_machine_processes`] for a machine's whole set.
+/// Call one of them on shutdown — nothing else will. Keeping a PID stable
+/// across restarts also bounds the damage: re-registering the same one is
 /// refused with [`crate::TamgaError::PidTaken`] rather than creating a second
 /// row, so the original row and its one slot are what stay in use.
 ///

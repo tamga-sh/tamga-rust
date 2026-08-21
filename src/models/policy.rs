@@ -16,10 +16,12 @@
 //! - `HeartbeatResurrectionStrategy`: `NO_REVIVE`, `1_MINUTE_REVIVE`,
 //!   `2_MINUTE_REVIVE`, `5_MINUTE_REVIVE`, `10_MINUTE_REVIVE`,
 //!   `15_MINUTE_REVIVE`, `ALWAYS_REVIVE`.
-//! - `check_in_interval`: lowercase wire values (`"day"`, `"week"`,
-//!   `"month"`, `"year"`) — inconsistent casing vs. the `SCREAMING_SNAKE_CASE`
-//!   used elsewhere; model with `#[serde(rename_all = "lowercase")]` rather
-//!   than assuming the same casing convention as the other enums.
+//! - `check_in_interval`: lowercase wire values — inconsistent casing vs. the
+//!   `SCREAMING_SNAKE_CASE` used elsewhere, and there are **two** lowercase
+//!   spellings in play. The column's `CHECK` constraint stores only
+//!   `"daily"`/`"weekly"`/`"monthly"`/`"yearly"`, which is what a `GET`
+//!   returns; the server's own overdue calculation matches the unstorable
+//!   `"day"`/`"week"`/`"month"`/`"year"`. `CheckInInterval` decodes both.
 //! - Free-text, branch-on-literal fields — model as open string newtypes
 //!   with named associated constants, **not** closed enums (the server
 //!   branches on literal string match; treat any unrecognized value as
@@ -53,6 +55,29 @@
 //!   `Option<i64>` and expect `None` from the server today; the SDK cannot
 //!   introspect these two limits client-side, only observe
 //!   `TOO_MUCH_MEMORY`/`TOO_MUCH_DISK` on a failed validation.
+
+/// The machine heartbeat window the server applies when
+/// `policy.heartbeat_duration` is null: **600 seconds**.
+///
+/// This is a fallback, not the window. `Policy::effective_heartbeat_duration_secs`
+/// (`tamga-api/src/features/policies/model.rs:262-264`) returns the policy's
+/// value whenever it is set, and the cull job's claim query selects on
+/// `COALESCE(p.heartbeat_duration, 600)`. A client that hardcodes this number
+/// under a policy asking for less pings too slowly and its machines go
+/// [`crate::models::machine::HeartbeatStatus::Dead`] on schedule.
+///
+/// Read the real window with
+/// [`crate::Client::effective_heartbeat_window`] rather than assuming this.
+pub const DEFAULT_HEARTBEAT_WINDOW_SECS: u64 = 600;
+
+/// How many pings the recommended interval fits inside one heartbeat window:
+/// **3**.
+///
+/// Three is the fleet-wide convention, and the margin is the point — two
+/// consecutive lost pings (a throttled `429` and its retry, a network blip)
+/// still leave one inside the window. At a divisor of 1 every single dropped
+/// ping is a missed deadline.
+pub const HEARTBEAT_INTERVAL_DIVISOR: u32 = 3;
 
 /// Signing scheme used for license/machine checkout files and (always,
 /// regardless of this value) machine offline proofs.
@@ -384,22 +409,74 @@ mod heartbeat_strategy_tests {
     }
 }
 
-/// Check-in cadence unit. ⚠️ Wire values are **lowercase**
-/// (`"day"`/`"week"`/`"month"`/`"year"`) — inconsistent with the
-/// `SCREAMING_SNAKE_CASE` convention every other enum in this crate uses.
-/// Modeled explicitly with `rename_all = "lowercase"` rather than assuming
-/// the same casing convention as `OverageStrategy` et al.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Check-in cadence unit. ⚠️ Wire values are **lowercase** — the one casing
+/// exception among this crate's `SCREAMING_SNAKE_CASE` enums.
+///
+/// ⚠️ **Two lowercase spellings exist and only one of them is storable.**
+/// The `policies.check_in_interval` column carries a `CHECK` constraint
+/// admitting exactly `'daily'`, `'weekly'`, `'monthly'`, `'yearly'`
+/// (`migrations/20240101000005_create_products_and_policies.sql:152-155`),
+/// and both `create_policy` and `update_policy` validate against the same
+/// four via `policies::enums::CHECK_IN_INTERVALS`. **Those adverb forms are
+/// what a `GET` returns.** The server's own overdue calculation
+/// (`licenses/validate_license.rs:394-400`) nevertheless matches on the bare
+/// nouns `"day"`/`"week"`/`"month"`/`"year"`, which the constraint makes
+/// unstorable, so every configured interval falls through its `_ => 30`
+/// default — reported upstream; the SDK cannot fix it.
+///
+/// Both spellings therefore deserialize here. Modelling only the nouns (as
+/// this crate did before the policy read routes existed) would have made
+/// every real policy with a check-in cadence set fail to decode *as a whole
+/// resource*, since a closed enum inside `Option<T>` errors rather than
+/// yielding `None`.
+///
+/// A value that is neither spelling still fails. That is the residual gap: it
+/// cannot be closed without adding a variant, and this enum is public and
+/// exhaustive, so a new variant would be a breaking change. Callers reading a
+/// policy from a future server that adds a fifth cadence should be ready for
+/// a [`crate::TamgaError::Json`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckInInterval {
-    /// `"day"`.
+    /// `"daily"` (server-storable) or `"day"`.
     Day,
-    /// `"week"`.
+    /// `"weekly"` (server-storable) or `"week"`.
     Week,
-    /// `"month"`.
+    /// `"monthly"` (server-storable) or `"month"`.
     Month,
-    /// `"year"`.
+    /// `"yearly"` (server-storable) or `"year"`.
     Year,
+}
+
+impl CheckInInterval {
+    /// The spelling the server actually stores and returns: `"daily"`,
+    /// `"weekly"`, `"monthly"`, `"yearly"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckInInterval::Day => "daily",
+            CheckInInterval::Week => "weekly",
+            CheckInInterval::Month => "monthly",
+            CheckInInterval::Year => "yearly",
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CheckInInterval {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "daily" | "day" => Ok(CheckInInterval::Day),
+            "weekly" | "week" => Ok(CheckInInterval::Week),
+            "monthly" | "month" => Ok(CheckInInterval::Month),
+            "yearly" | "year" => Ok(CheckInInterval::Year),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown check_in_interval {other:?}: expected one of \
+                 daily/weekly/monthly/yearly"
+            ))),
+        }
+    }
 }
 
 /// A free-text policy field the server branches on via literal string
@@ -524,15 +601,18 @@ pub struct PolicyAttributes {
     /// and the cull job's claim query selects on
     /// `COALESCE(p.heartbeat_duration, 600)`.
     ///
-    /// ⚠️ Nothing in this crate can fetch a [`Policy`] to read it directly:
-    /// there is no `get_policy`, and the licence resource carries no policy
-    /// relationship. The value is still observable indirectly — machine
-    /// checkout and offline proof resolve through a policy-joined read, so
-    /// `next_heartbeat_at - last_heartbeat_at` on a verified machine file or
-    /// a proof response is the effective window. The write responses (create,
-    /// ping-heartbeat, reset-heartbeat) carry the 600s fallback instead and
-    /// will not reveal it. Failing either, learn the value out of band — from
-    /// whoever provisions the policy — and set the ping interval explicitly.
+    /// Read it directly with [`crate::Client::get_license_policy`], or take
+    /// the derived numbers from [`PolicyAttributes::effective_heartbeat_window`]
+    /// and [`crate::Client::recommended_heartbeat_interval`]. The licence
+    /// resource still carries no policy relationship, so the *licence* id is
+    /// the way in — `GET /licenses/{id}/policy`, not `GET /policies/{id}`,
+    /// which a licence key lacks the `policy.read` permission for.
+    ///
+    /// It is also observable indirectly, on any response the server built
+    /// from a policy-joined read: `next_heartbeat_at - last_heartbeat_at` via
+    /// [`crate::models::machine::MachineAttributes::observed_heartbeat_window`].
+    /// The write responses (create, ping-heartbeat, reset-heartbeat) carry
+    /// the 600s fallback instead and will not reveal it.
     /// See [`crate::models::machine::HeartbeatStatus`]'s doc comment.
     ///
     /// Processes are unaffected: their window is a separate hardcoded 30s
@@ -598,9 +678,71 @@ pub struct PolicyAttributes {
     pub updated: chrono::DateTime<chrono::Utc>,
 }
 
+impl PolicyAttributes {
+    /// The heartbeat window the server will actually judge this policy's
+    /// machines against: `heartbeat_duration` when set, else
+    /// [`DEFAULT_HEARTBEAT_WINDOW_SECS`].
+    ///
+    /// Mirrors `Policy::effective_heartbeat_duration_secs` server-side
+    /// (`tamga-api/src/features/policies/model.rs:262-264`) exactly, including
+    /// the fallback — this is the only client-side value that agrees with the
+    /// cull job's `COALESCE(p.heartbeat_duration, 600)` by construction.
+    ///
+    /// ⚠️ A window says nothing about whether anything is *enforced*. Culling
+    /// is gated on [`Self::require_heartbeat`], which is `NOT NULL DEFAULT
+    /// FALSE`, so under a default policy a machine that misses this window
+    /// reports `Dead` forever and is never removed.
+    pub fn effective_heartbeat_window(&self) -> std::time::Duration {
+        let secs = self
+            .heartbeat_duration
+            .filter(|secs| *secs > 0)
+            .map(|secs| secs as u64)
+            .unwrap_or(DEFAULT_HEARTBEAT_WINDOW_SECS);
+        std::time::Duration::from_secs(secs)
+    }
+
+    /// [`Self::effective_heartbeat_window`] divided by
+    /// [`HEARTBEAT_INTERVAL_DIVISOR`] — the ping interval to schedule.
+    ///
+    /// 200s under the 600s fallback. Never zero: a policy configured with a
+    /// window shorter than the divisor still yields a 1-second interval
+    /// rather than a timer that fires continuously.
+    pub fn recommended_heartbeat_interval(&self) -> std::time::Duration {
+        let window = self.effective_heartbeat_window();
+        std::cmp::max(
+            window / HEARTBEAT_INTERVAL_DIVISOR,
+            std::time::Duration::from_secs(1),
+        )
+    }
+}
+
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    fn representative_policy_json() -> serde_json::Value {
+        serde_json::json!({
+            "type": "policies",
+            "id": "01926b3e-0000-7000-8000-000000000000",
+            "attributes": {
+                "product_id": "01926b3e-1111-7000-8000-000000000000",
+                "name": "Default", "duration": null, "strict": false, "floating": false,
+                "scheme": null, "encrypted": false, "use_pool": false, "protected": false,
+                "require_check_in": false, "check_in_interval": null,
+                "check_in_interval_count": null, "require_heartbeat": false,
+                "heartbeat_duration": null,
+                "heartbeat_cull_strategy": "DEACTIVATE_DEAD",
+                "heartbeat_resurrection_strategy": "NO_RESURRECTION",
+                "machine_uniqueness_strategy": "UNIQUE_PER_LICENSE",
+                "expiration_strategy": "RESTRICT_ACCESS", "expiration_basis": "FROM_CREATION",
+                "renewal_basis": "FROM_EXPIRY", "authentication_strategy": "TOKEN",
+                "overage_strategy": "DENY_ACCESS",
+                "max_machines": null, "max_cores": null, "max_uses": null,
+                "max_processes": null, "max_users": null, "metadata": {},
+                "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+            }
+        })
+    }
 
     #[test]
     fn deserializes_a_representative_policy_with_the_real_bogus_defaults() {
@@ -650,6 +792,93 @@ mod policy_tests {
             let parsed: CheckInInterval = serde_json::from_str(wire).unwrap();
             assert_eq!(parsed, expected, "wire value {wire}");
         }
+    }
+
+    #[test]
+    fn check_in_interval_deserializes_the_adverb_spellings_the_server_stores() {
+        // These are the only four the `policies.check_in_interval` CHECK
+        // constraint admits, so these are what a GET actually returns. The
+        // noun forms above are what the server's own overdue calculation
+        // matches on and can never see.
+        for (wire, expected) in [
+            ("\"daily\"", CheckInInterval::Day),
+            ("\"weekly\"", CheckInInterval::Week),
+            ("\"monthly\"", CheckInInterval::Month),
+            ("\"yearly\"", CheckInInterval::Year),
+        ] {
+            let parsed: CheckInInterval = serde_json::from_str(wire).unwrap();
+            assert_eq!(parsed, expected, "wire value {wire}");
+            assert_eq!(format!("\"{}\"", expected.as_str()), wire);
+        }
+    }
+
+    #[test]
+    fn a_policy_carrying_a_real_check_in_interval_decodes_as_a_whole_resource() {
+        // Regression: modelling only "day"/"week"/… made a closed enum inside
+        // `Option<CheckInInterval>` fail the *entire* Policy deserialization
+        // for every policy with a check-in cadence configured — the read
+        // routes would have been unusable against a real server.
+        let mut json = representative_policy_json();
+        json["attributes"]["check_in_interval"] = serde_json::json!("weekly");
+        json["attributes"]["check_in_interval_count"] = serde_json::json!(2);
+        let policy: Policy = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            policy.attributes.check_in_interval,
+            Some(CheckInInterval::Week)
+        );
+        assert_eq!(policy.attributes.check_in_interval_count, Some(2));
+    }
+
+    #[test]
+    fn an_unrecognized_check_in_interval_is_reported_not_silently_dropped() {
+        let parsed: Result<CheckInInterval, _> = serde_json::from_str("\"fortnightly\"");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn effective_heartbeat_window_falls_back_to_600s_only_when_unset() {
+        let mut json = representative_policy_json();
+        let policy: Policy = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            policy.attributes.effective_heartbeat_window(),
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(
+            policy.attributes.recommended_heartbeat_interval(),
+            std::time::Duration::from_secs(200)
+        );
+
+        json["attributes"]["heartbeat_duration"] = serde_json::json!(90);
+        let policy: Policy = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            policy.attributes.effective_heartbeat_window(),
+            std::time::Duration::from_secs(90)
+        );
+        assert_eq!(
+            policy.attributes.recommended_heartbeat_interval(),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn a_degenerate_heartbeat_duration_never_yields_a_zero_interval() {
+        let mut json = representative_policy_json();
+        // A timer built from a zero interval spins; a non-positive column
+        // value is treated as unset, matching how the crate handles a
+        // non-positive interval everywhere else.
+        json["attributes"]["heartbeat_duration"] = serde_json::json!(0);
+        let policy: Policy = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            policy.attributes.effective_heartbeat_window(),
+            std::time::Duration::from_secs(600)
+        );
+
+        json["attributes"]["heartbeat_duration"] = serde_json::json!(2);
+        let policy: Policy = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            policy.attributes.recommended_heartbeat_interval(),
+            std::time::Duration::from_secs(1)
+        );
     }
 
     #[test]
