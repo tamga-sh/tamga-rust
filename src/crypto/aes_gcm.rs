@@ -33,8 +33,7 @@ pub fn decrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes_gcm::aead::rand_core::RngCore;
-    use aes_gcm::aead::OsRng;
+    use rand::{rngs::OsRng, RngCore};
 
     fn encrypt_for_test(key: &[u8; 32], plaintext: &[u8]) -> ([u8; 12], Vec<u8>) {
         let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));

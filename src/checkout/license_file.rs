@@ -457,8 +457,9 @@ mod tests {
         let (enc, alg) = match encryption_key {
             None => (B64.encode(payload_json.as_bytes()), "base64+ed25519+v2"),
             Some(key) => {
-                use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+                use aes_gcm::aead::Aead;
                 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+                use rand::{rngs::OsRng as AeadOsRng, RngCore as _};
                 let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
                 let mut nonce_bytes = [0u8; 12];
                 AeadOsRng.fill_bytes(&mut nonce_bytes);
@@ -648,8 +649,9 @@ mod tests {
         use base64::Engine as _;
         const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
         let mut enc_bytes = {
-            use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+            use aes_gcm::aead::Aead;
             use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+            use rand::{rngs::OsRng as AeadOsRng, RngCore as _};
             let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*enc_key));
             let mut nonce_bytes = [0u8; 12];
             AeadOsRng.fill_bytes(&mut nonce_bytes);

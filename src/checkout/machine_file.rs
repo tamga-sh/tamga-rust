@@ -676,8 +676,9 @@ mod tests {
         let (enc_prefix, enc) = match encrypt_key {
             None => ("base64", B64.encode(payload.as_bytes())),
             Some(key) => {
-                use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+                use aes_gcm::aead::Aead;
                 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+                use rand::{rngs::OsRng as AeadOsRng, RngCore as _};
                 let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
                 let mut nonce_bytes = [0u8; NONCE_LEN];
                 AeadOsRng.fill_bytes(&mut nonce_bytes);
@@ -735,8 +736,9 @@ mod tests {
         let (enc_prefix, enc) = match encrypt_key {
             None => ("base64", B64.encode(payload.as_bytes())),
             Some(key) => {
-                use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+                use aes_gcm::aead::Aead;
                 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+                use rand::{rngs::OsRng as AeadOsRng, RngCore as _};
                 let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
                 let mut nonce_bytes = [0u8; NONCE_LEN];
                 AeadOsRng.fill_bytes(&mut nonce_bytes);
@@ -1067,8 +1069,9 @@ mod tests {
         let key = crate::crypto::hkdf::derive_machine_file_key(license_key, fingerprint);
         let payload = representative_payload_json(None);
         let enc = {
-            use aes_gcm::aead::{rand_core::RngCore as _, Aead, OsRng as AeadOsRng};
+            use aes_gcm::aead::Aead;
             use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+            use rand::{rngs::OsRng as AeadOsRng, RngCore as _};
             let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
             let mut nonce_bytes = [0u8; NONCE_LEN];
             AeadOsRng.fill_bytes(&mut nonce_bytes);
