@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3](https://github.com/tamga-sh/tamga-rust/compare/v0.3.2...v0.3.3) - 2026-09-04
+
+### Miscellaneous
+
+- Bump aes-gcm from 0.10.3 to 0.11.1 ([#44](https://github.com/tamga-sh/tamga-rust/pull/44)) (4aace27)
+
+
+
 ## [0.3.2](https://github.com/tamga-sh/tamga-rust/compare/v0.3.1...v0.3.2) - 2026-08-21
 
 ### Bug Fixes
