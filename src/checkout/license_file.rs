@@ -55,10 +55,10 @@
 //! exactly the error a forged file produces. Where that distinction matters —
 //! and it usually does, since one calls for refreshing keys and the other for
 //! refusing the customer — verify through a
-//! [`crate::checkout::key_set::SigningKeySet`] instead: the `kid` claim selects
-//! the key, an unknown `kid` is
-//! [`crate::error::CheckoutError::UnknownSigningKey`], and a known `kid` with a
-//! bad signature stays [`crate::error::CryptoError::VerificationFailed`].
+//! [`crate::checkout::key_set::SigningKeySet`] instead: every held key is
+//! tried against the signature, and a failure is labelled by the `kid`: not
+//! held is [`crate::error::CheckoutError::UnknownSigningKey`], held is
+//! [`crate::error::CryptoError::VerificationFailed`].
 //!
 //! Public API: [`verify_license_file`] orchestrates the full flow above,
 //! [`verify_license_file_with_claims`] additionally returns the signed claims,
@@ -243,24 +243,28 @@ pub fn verify_license_file_at(
     now_unix: i64,
 ) -> Result<VerifiedLicenseFile, crate::error::CheckoutError> {
     let cert = parse_envelope(pem)?;
-    // Order is deliberate and differs from the key-set path below: nothing is
-    // decoded or decrypted until the signature over `enc` has passed.
+    // The `alg` gate runs before any key or signature work on every entry
+    // point, so a v1 file gets the same answer whichever key it meets.
+    let encoding = validate_alg(&cert.alg)?;
+    // Nothing is decoded or decrypted until the signature over `enc` has
+    // passed.
     verify_signature(ed25519_pubkey, &cert)?;
-    let plaintext = decode_plaintext(&cert, license_key)?;
+    let plaintext = decode_plaintext(&cert, encoding, license_key)?;
     finish(&plaintext, now_unix)
 }
 
-/// As [`verify_license_file`], selecting the public key by the file's own
-/// `kid` claim from a set of keys the caller trusts.
+/// As [`verify_license_file`], verifying against a set of keys the caller
+/// trusts rather than one, and labelling a failure by the file's own `kid`
+/// claim.
 ///
-/// This is what makes a key rotation survivable. Verifying against one embedded
-/// key reports a file signed before the rotation with exactly the error a
-/// forged file produces; through a key set the two are distinct outcomes:
+/// This is what makes a key rotation survivable. Verifying against one
+/// embedded key reports a file signed before the rotation with exactly the
+/// error a forged file produces; through a key set the two are distinct:
 ///
-/// - the `kid` is not in the set →
-///   [`crate::error::CheckoutError::UnknownSigningKey`] — fetch the account's
-///   key set, or ship an application update, and try again;
-/// - the `kid` is in the set but the signature fails →
+/// - no held key verifies the signature and the `kid` is not in the set →
+///   [`crate::error::CheckoutError::UnknownSigningKey`] — fetch the
+///   account's key set, or ship an application update, and try again;
+/// - no held key verifies and the `kid` *is* in the set →
 ///   [`crate::error::CryptoError::VerificationFailed`] — refuse the file.
 ///
 /// Build the set with [`crate::Client::signing_key_set`] (one call, cacheable
@@ -272,13 +276,16 @@ pub fn verify_license_file_at(
 /// [`verify_license_file`]. The signed `exp` claim is enforced the same way
 /// too; use [`verify_license_file_with_key_set_at`] to supply the time.
 ///
-/// One ordering difference from [`verify_license_file`] is worth knowing:
-/// selecting a key needs the `kid`, and the `kid` lives inside `enc`, so `enc`
-/// is decoded (and, when encrypted, decrypted under the licence key) *before*
-/// the signature is checked. A file that is malformed or undecryptable
-/// therefore reports that rather than a signature failure. Nothing from those
-/// bytes is trusted: the only value taken from them before verification is the
-/// `kid`, and it can only ever select from keys the caller already supplied.
+/// The order is the same as [`verify_license_file`]'s: the `alg` gate, then
+/// every held key against the signature over `enc`'s base64 string, and only
+/// then is `enc` decoded — so nothing attacker-chosen reaches the decoder,
+/// the cipher or the JSON parser on the success path. When no key verifies,
+/// `enc` is decoded (and, when encrypted, decrypted under the licence key)
+/// solely to read `meta.kid` and label the failure; nothing else is taken
+/// from those bytes. One consequence worth knowing: once a signature has
+/// verified, a [`crate::error::CryptoError::DecryptionFailed`] can only mean
+/// the wrong licence key, because the ciphertext is inside the signature that
+/// just passed.
 pub fn verify_license_file_with_key_set(
     pem: &str,
     keys: &crate::checkout::key_set::SigningKeySet,
@@ -296,13 +303,20 @@ pub fn verify_license_file_with_key_set_at(
     now_unix: i64,
 ) -> Result<VerifiedLicenseFile, crate::error::CheckoutError> {
     let cert = parse_envelope(pem)?;
-    let plaintext = decode_plaintext(&cert, license_key)?;
-    let kid = probe_kid(&plaintext)?;
-    let pubkey = keys
-        .find(&kid)
-        .ok_or(crate::error::CheckoutError::UnknownSigningKey { kid })?;
-    verify_signature(pubkey, &cert)?;
-    finish(&plaintext, now_unix)
+    let encoding = validate_alg(&cert.alg)?;
+    let sig_bytes = decode_signature(&cert)?;
+
+    // ⚠️ Every held key is tried against `enc`'s base64 STRING bytes, before
+    // a byte of `enc` is decoded — the same order as the single-key path.
+    match keys.find_verifying_key(cert.enc.as_bytes(), &sig_bytes)? {
+        Some(_verified_key) => {
+            let plaintext = decode_plaintext(&cert, encoding, license_key)?;
+            finish(&plaintext, now_unix)
+        }
+        // No held key signed this. `enc` is opened now, and only now, and
+        // only so the `kid` it names can label the failure.
+        None => Err(keys.label_failure(decode_plaintext(&cert, encoding, license_key))),
+    }
 }
 
 /// Strips the PEM markers and parses the inner `{ enc, sig, alg }` JSON.
@@ -323,6 +337,14 @@ fn parse_envelope(pem: &str) -> Result<CertPayload, crate::error::CheckoutError>
     Ok(serde_json::from_slice(&cert_json)?)
 }
 
+/// Base64-decodes `sig`. Shared by both entry points.
+fn decode_signature(cert: &CertPayload) -> Result<Vec<u8>, crate::error::CheckoutError> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(&cert.sig)
+        .map_err(|_| crate::error::CheckoutError::InvalidBase64)
+}
+
 /// Ed25519-verifies `cert.sig` against `cert.enc`.
 ///
 /// ⚠️ The signature covers `enc`'s ASCII/UTF-8 bytes — the base64 STRING
@@ -331,21 +353,49 @@ fn verify_signature(
     ed25519_pubkey: &[u8; 32],
     cert: &CertPayload,
 ) -> Result<(), crate::error::CheckoutError> {
-    use base64::Engine as _;
-    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
-
-    let sig_bytes = B64
-        .decode(&cert.sig)
-        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
+    let sig_bytes = decode_signature(cert)?;
     crate::crypto::ed25519::verify(ed25519_pubkey, cert.enc.as_bytes(), &sig_bytes)?;
     Ok(())
 }
 
-/// Base64-decodes `enc`, decrypting it first when `alg` says it is encrypted.
+/// How `enc` is encoded, as declared by `alg`. Private: the two legal
+/// strings are matched whole and nothing outside this module needs the
+/// distinction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncEncoding {
+    /// `base64+ed25519+v2` — `enc` is base64 of the payload JSON.
+    Plain,
+    /// `aes-256-gcm+ed25519+v2` — `enc` is base64 of `nonce ‖ ciphertext ‖ tag`.
+    Aes256Gcm,
+}
+
+/// The `alg` gate. Runs before any key or signature work on every entry
+/// point, single-key and key-set alike.
 ///
-/// Rejects any `alg` without the `+v2` suffix — there is no v1 fallback.
+/// Exactly two strings are legal, matched whole; a v1 file (no `+v2`) is
+/// [`crate::error::CheckoutError::UnsupportedAlgorithm`] and there is no
+/// fallback — see the module doc for why. Running it first is what makes
+/// the answer entry-point-independent: a v1 file presented with the wrong
+/// key used to report a signature failure through [`verify_license_file`]
+/// and an unsupported algorithm through
+/// [`verify_license_file_with_key_set`] — one file, two diagnoses.
+fn validate_alg(alg: &str) -> Result<EncEncoding, crate::error::CheckoutError> {
+    match alg {
+        "base64+ed25519+v2" => Ok(EncEncoding::Plain),
+        "aes-256-gcm+ed25519+v2" => Ok(EncEncoding::Aes256Gcm),
+        other => Err(crate::error::CheckoutError::UnsupportedAlgorithm(
+            other.to_string(),
+        )),
+    }
+}
+
+/// Base64-decodes `enc`, decrypting it first when `encoding` says so.
+///
+/// `encoding` comes from [`validate_alg`], which every caller has already
+/// run, so no `alg` check happens here.
 fn decode_plaintext(
     cert: &CertPayload,
+    encoding: EncEncoding,
     license_key: Option<&str>,
 ) -> Result<Vec<u8>, crate::error::CheckoutError> {
     use base64::Engine as _;
@@ -355,9 +405,9 @@ fn decode_plaintext(
         .decode(&cert.enc)
         .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
 
-    match cert.alg.as_str() {
-        "base64+ed25519+v2" => Ok(enc_bytes),
-        "aes-256-gcm+ed25519+v2" => {
+    match encoding {
+        EncEncoding::Plain => Ok(enc_bytes),
+        EncEncoding::Aes256Gcm => {
             let key_str = license_key.ok_or(crate::error::CheckoutError::LicenseKeyMissing)?;
             let key = crate::crypto::hkdf::derive_license_file_key(key_str);
             // nonce(12B) ‖ ciphertext ‖ tag(16B) — at least 28 bytes even
@@ -375,9 +425,6 @@ fn decode_plaintext(
                 ciphertext_and_tag,
             )?)
         }
-        other => Err(crate::error::CheckoutError::UnsupportedAlgorithm(
-            other.to_string(),
-        )),
     }
 }
 
@@ -493,6 +540,19 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(pubkey)
     }
 
+    /// Re-wraps `pem` with a different `alg`, leaving `enc` and `sig` intact.
+    /// `alg` is not covered by the signature, so this is exactly the downgrade
+    /// an attacker can attempt.
+    fn repack_alg(pem: &str, alg: &str) -> String {
+        use base64::Engine as _;
+        let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        let cert_json = B64_TEST.decode(body.trim()).unwrap();
+        let mut cert: serde_json::Value = serde_json::from_slice(&cert_json).unwrap();
+        cert["alg"] = serde_json::json!(alg);
+        let repacked = B64_TEST.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        format!("{PEM_HEADER}\n{repacked}\n{PEM_FOOTER}")
+    }
+
     fn representative_payload_json() -> String {
         serde_json::json!({
             "data": {
@@ -590,6 +650,23 @@ mod tests {
         let err = verify_license_file(&v1_pem, &pubkey, None).unwrap_err();
         assert!(matches!(
             err,
+            crate::error::CheckoutError::UnsupportedAlgorithm(ref a) if a == "base64+ed25519"
+        ));
+    }
+
+    #[test]
+    fn a_v1_alg_is_refused_before_the_signature_is_even_checked() {
+        // D17. The same file must produce the same error from every entry
+        // point, and the `alg` gate must not depend on holding the right
+        // key: presented with the WRONG key, a v1 file used to report a
+        // signature failure here and UnsupportedAlgorithm through a key set.
+        let (_pubkey, signing_key) = gen_keypair();
+        let (wrong_pubkey, _) = gen_keypair();
+        let pem = build_pem(&representative_payload_json(), &signing_key, None);
+        let v1_pem = repack_alg(&pem, "base64+ed25519");
+
+        assert!(matches!(
+            verify_license_file(&v1_pem, &wrong_pubkey, None).unwrap_err(),
             crate::error::CheckoutError::UnsupportedAlgorithm(ref a) if a == "base64+ed25519"
         ));
     }
@@ -760,10 +837,99 @@ mod tests {
     }
 
     #[test]
-    fn the_key_set_path_decrypts_an_encrypted_file_and_still_enforces_exp() {
-        // The kid lives inside the ciphertext, so the encrypted variant has to
-        // be decrypted before a key can be chosen — and expiry is enforced
-        // afterwards exactly as on the single-key path, not skipped.
+    fn the_key_set_path_verifies_before_it_decrypts() {
+        // D16, stated as the order of two checks. Every held key is tried
+        // against the signature BEFORE a byte of `enc` is opened; the kid
+        // inside the ciphertext is read only when none verifies, and only
+        // to label the failure. Two observable consequences:
+        // - a set that does not hold the signer, plus the wrong licence key:
+        //   a signature failure. The ciphertext was opened only to read the
+        //   kid, could not be, and the failure stands unlabelled.
+        // - a set that holds the signer, plus the wrong licence key:
+        //   DecryptionFailed — and since `enc` is inside the signature that
+        //   just passed, that can only mean the wrong key, never tampering.
+        let (pubkey, signing) = gen_keypair();
+        let (other_pubkey, _) = gen_keypair();
+        let b64 = pubkey_b64(&pubkey);
+        let kid = crate::crypto::ed25519::key_id(&b64);
+        let enc_key = crate::crypto::hkdf::derive_license_file_key("lic-abc123");
+        let pem = build_pem(&payload_json_with_kid(&kid), &signing, Some(&enc_key));
+
+        let stale =
+            crate::checkout::key_set::SigningKeySet::from_public_keys([pubkey_b64(&other_pubkey)])
+                .unwrap();
+        assert!(
+            matches!(
+                verify_license_file_with_key_set(&pem, &stale, Some("wrong-key")).unwrap_err(),
+                crate::error::CheckoutError::Crypto(crate::error::CryptoError::VerificationFailed)
+            ),
+            "an unreadable kid leaves the signature failure standing"
+        );
+
+        let held = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
+        assert!(
+            matches!(
+                verify_license_file_with_key_set(&pem, &held, Some("wrong-key")).unwrap_err(),
+                crate::error::CheckoutError::Crypto(crate::error::CryptoError::DecryptionFailed)
+            ),
+            "after a verified signature, a decryption failure is a wrong-key report"
+        );
+        assert!(verify_license_file_with_key_set(&pem, &held, Some("lic-abc123")).is_ok());
+    }
+
+    #[test]
+    fn a_held_key_verifies_a_file_whatever_kid_it_names() {
+        // The signature decides; the kid only labels a failure. A file
+        // signed by a held key verifies even when its kid names another
+        // held key — the "no try-every-key" rule is gone on purpose.
+        let (pubkey_a, signing_a) = gen_keypair();
+        let (pubkey_b, _) = gen_keypair();
+        let a_b64 = pubkey_b64(&pubkey_a);
+        let b_b64 = pubkey_b64(&pubkey_b);
+        let pem = build_pem(
+            &payload_json_with_kid(&crate::crypto::ed25519::key_id(&b_b64)),
+            &signing_a,
+            None,
+        );
+        let keys =
+            crate::checkout::key_set::SigningKeySet::from_public_keys([&a_b64, &b_b64]).unwrap();
+
+        assert!(verify_license_file_with_key_set(&pem, &keys, None).is_ok());
+    }
+
+    #[test]
+    fn a_stale_set_with_an_encrypted_file_still_names_the_kid_given_the_licence_key() {
+        // The label needs the kid and the kid is inside the ciphertext: with
+        // the right licence key the probe reads it and names the stale set.
+        // With no licence key at all, the missing argument is reported as
+        // such rather than dressed up as a verdict.
+        let (_pubkey, signing) = gen_keypair();
+        let (other_pubkey, _) = gen_keypair();
+        let enc_key = crate::crypto::hkdf::derive_license_file_key("lic-abc123");
+        let pem = build_pem(
+            &payload_json_with_kid("abcdef0123456789"),
+            &signing,
+            Some(&enc_key),
+        );
+        let stale =
+            crate::checkout::key_set::SigningKeySet::from_public_keys([pubkey_b64(&other_pubkey)])
+                .unwrap();
+
+        assert!(matches!(
+            verify_license_file_with_key_set(&pem, &stale, Some("lic-abc123")).unwrap_err(),
+            crate::error::CheckoutError::UnknownSigningKey { ref kid } if kid == "abcdef0123456789"
+        ));
+        assert!(matches!(
+            verify_license_file_with_key_set(&pem, &stale, None).unwrap_err(),
+            crate::error::CheckoutError::LicenseKeyMissing
+        ));
+    }
+
+    #[test]
+    fn the_key_set_path_opens_an_encrypted_file_and_still_enforces_exp() {
+        // The signature is checked against every held key first; the
+        // ciphertext is opened only afterwards — and expiry is enforced
+        // exactly as on the single-key path, not skipped.
         let (pubkey, signing) = gen_keypair();
         let b64 = pubkey_b64(&pubkey);
         let kid = crate::crypto::ed25519::key_id(&b64);
@@ -797,9 +963,8 @@ mod tests {
     #[test]
     fn the_key_set_path_refuses_a_v1_file_too() {
         use base64::Engine as _;
-        // The key-set path decodes before it verifies, so a v1 `alg` is caught
-        // by the algorithm check rather than by the signature — but caught it
-        // must still be.
+        // The alg gate runs first on every entry point; the key-set path is
+        // no way round it.
         let (pubkey, signing) = gen_keypair();
         let b64 = pubkey_b64(&pubkey);
         let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();

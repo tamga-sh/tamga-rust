@@ -413,10 +413,11 @@ pub enum CheckoutError {
     /// through a key set: the first calls for refreshing the keys, the second
     /// for refusing the file.
     ///
-    /// Nothing about the file has been trusted at this point. The `kid` is
-    /// read from bytes whose signature has not been checked and is used only
-    /// to select from keys the caller already trusts — it can never introduce
-    /// one.
+    /// Nothing about the file has been trusted at this point. Every key the
+    /// caller holds has already been tried against the signature and none
+    /// verified; the `kid` is then read from those still-unverified bytes
+    /// only to label which failure this is — it never selects a key to
+    /// verify against, and it can never introduce one.
     #[error("no signing key for kid {kid} in the supplied key set")]
     UnknownSigningKey {
         /// The `kid` the file claims, verbatim. Log it next to
@@ -520,26 +521,59 @@ impl TamgaError {
 /// these in a top-level `{ "errors": [...] }` array; this SDK surfaces only
 /// the first element via [`TamgaError::Api`] — every endpoint this crate
 /// calls returns at most one error per response today.
+///
+/// Tolerant on the way in, deliberately: `status` may be a JSON string or a
+/// JSON number, and `title`/`detail` may be absent. A document that failed
+/// to decode used to be replaced wholesale by a synthetic `UNKNOWN` error
+/// (`client.rs`, `api_error`), which threw away a perfectly good `code`.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct JsonApiError {
     /// Server-generated UUIDv7, unique per error occurrence — useful to
     /// correlate with server-side logs alongside `X-Request-Id`.
     pub id: String,
     /// HTTP status code, as a string (JSON:API convention), e.g. `"404"`.
+    ///
+    /// A server that sends the number (`422`) — the shape the API patch's
+    /// new `422`s are specified with — decodes to the same `"422"`.
+    #[serde(deserialize_with = "deserialize_status")]
     pub status: String,
     /// Stable, machine-matchable code, e.g. `"NOT_FOUND"`,
     /// `"FINGERPRINT_TAKEN"`, `"CHECK_IN_NOT_REQUIRED"`. Match on this, not
     /// `detail`.
     pub code: String,
-    /// Short, human-readable summary of the error type.
+    /// Short, human-readable summary of the error type. Empty when the
+    /// server omitted it.
+    #[serde(default)]
     pub title: String,
     /// Human-readable, request-specific explanation. May change wording
-    /// across server versions — not stable for programmatic matching.
+    /// across server versions — not stable for programmatic matching. Empty
+    /// when the server omitted it.
+    #[serde(default)]
     pub detail: String,
     /// Present for validation errors (`422`) — points at the offending
     /// request body field via a JSON Pointer.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<JsonApiErrorSource>,
+}
+
+/// `status` as either JSON representation. A plain `String` field refuses
+/// the number, and refusing it fails the whole document — the D18 defect.
+fn deserialize_status<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StatusRepr {
+        Text(String),
+        Number(u64),
+    }
+
+    Ok(match StatusRepr::deserialize(deserializer)? {
+        StatusRepr::Text(text) => text,
+        StatusRepr::Number(number) => number.to_string(),
+    })
 }
 
 /// `source.pointer` on a [`JsonApiError`] — a JSON Pointer (RFC 6901) into
@@ -739,6 +773,50 @@ mod tests {
         let mapped = TamgaError::from_json_api_error(err);
         assert!(matches!(mapped, TamgaError::Api(_)));
         assert_eq!(mapped.code(), Some("SCOPE_NOT_SUPPORTED"));
+    }
+
+    #[test]
+    fn a_numeric_status_decodes_to_its_decimal_string() {
+        // D18. The wire shape the API plan specifies for the new 422s puts
+        // `status` on the wire as a JSON number; pre-patch servers send the
+        // JSON:API string "422". Both must decode to the same `String`.
+        let json = serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": 422,
+                "code": "SIGNING_KEY_MISSING",
+                "title": "Unprocessable Entity",
+                "detail": "the account has no Ed25519 signing key",
+                "source": null,
+            }]
+        });
+        let doc: JsonApiErrorDocument = serde_json::from_value(json).unwrap();
+        assert_eq!(doc.errors[0].status, "422");
+        assert_eq!(doc.errors[0].code, "SIGNING_KEY_MISSING");
+    }
+
+    #[test]
+    fn a_missing_title_or_detail_does_not_fail_the_whole_document() {
+        // A failed decode collapses a perfectly good `code` into "UNKNOWN"
+        // (client.rs `api_error`), which is the D18 defect in a second shape.
+        let json = serde_json::json!({
+            "errors": [{ "id": "e1", "status": "422", "code": "SECRET_KEY_MISSING" }]
+        });
+        let doc: JsonApiErrorDocument = serde_json::from_value(json).unwrap();
+        assert_eq!(doc.errors[0].code, "SECRET_KEY_MISSING");
+        assert_eq!(doc.errors[0].title, "");
+        assert_eq!(doc.errors[0].detail, "");
+    }
+
+    #[test]
+    fn the_two_new_422_codes_land_on_api_with_their_code_intact() {
+        // `TamgaError` is public and exhaustive, so neither gets a variant;
+        // the contract is that `code()` survives on the generic arm.
+        for code in ["SIGNING_KEY_MISSING", "SECRET_KEY_MISSING"] {
+            let err = error_with_code("422", code);
+            assert!(matches!(err, TamgaError::Api(_)), "{code}: {err:?}");
+            assert_eq!(err.code(), Some(code));
+        }
     }
 
     fn error_with_code(status: &str, code: &str) -> TamgaError {

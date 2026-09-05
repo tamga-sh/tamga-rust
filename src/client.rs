@@ -1779,6 +1779,21 @@ impl Client {
     /// Over-limit **creation** behaves exactly as in
     /// [`Self::activate_machine`], including the strict-policy path where no
     /// row is created and [`MachineActivation::machine`] is `None`.
+    ///
+    /// On the *created* path, an over-limit verdict with
+    /// `auto_delete_on_overage` rolls the new row back, and
+    /// [`MachineActivation::machine`] is then `None`. So `None` means *no
+    /// machine survives this call* on both routes that produce it — the
+    /// strict-policy refusal, where nothing was created, and the rollback,
+    /// where this call deletes the row it just created. That delete's
+    /// `Result` is discarded (the same swallow this method already uses on
+    /// the create-time rollback path above), so the SDK never confirms the
+    /// rollback DELETE itself succeeded; if that DELETE failed — a network
+    /// error, a `429`, and so on — the row may still exist server-side
+    /// despite `machine: None` being reported. `validation.meta.code`
+    /// carries the limit either way, and there is still no machine id worth
+    /// storing — the caller has nothing to clean up by id even when the
+    /// delete did not land.
     pub async fn activate_machine_idempotent(
         &self,
         license_id: uuid::Uuid,
@@ -1818,15 +1833,19 @@ impl Client {
 
         let validation = self.validate_by_id(license_id, scope, false, None).await?;
 
-        // Only a row this call created is ours to roll back.
-        if auto_delete_on_overage && !reused && is_overage_code(&validation.meta.code) {
-            if let Some(ref machine) = machine {
-                let _ = self.delete_machine(machine.id).await;
+        // Only a row this call created is ours to roll back — and once rolled
+        // back it must not be reported, because its resource would name a
+        // machine that no longer exists.
+        let rolled_back =
+            auto_delete_on_overage && !reused && is_overage_code(&validation.meta.code);
+        if rolled_back {
+            if let Some(ref created) = machine {
+                let _ = self.delete_machine(created.id).await;
             }
         }
 
         Ok(MachineActivation {
-            machine,
+            machine: if rolled_back { None } else { machine },
             validation,
             reused,
         })
@@ -2606,9 +2625,23 @@ pub struct UpdateMachineOptions {
 /// The outcome of [`Client::activate_machine_idempotent`].
 #[derive(Debug, Clone)]
 pub struct MachineActivation {
-    /// The activated machine, or `None` when the server refused to create it
-    /// under a strict overage strategy — in which case no row exists and
-    /// `validation` carries the limit that blocked it.
+    /// The machine this activation resolved to — created by this call, or
+    /// adopted (see `reused`) — or `None` when no machine survives the call:
+    ///
+    /// - the server refused to create it under a strict overage strategy, so
+    ///   no row was ever created; or
+    /// - this call created it, the validation came back over-limit, and
+    ///   `auto_delete_on_overage` rolled it back. The rollback DELETE's
+    ///   `Result` is discarded, matching this method's error-handling
+    ///   elsewhere, so the SDK does not confirm that DELETE actually
+    ///   succeeded — in the rare case it failed, the row may still exist
+    ///   server-side even though `machine` is `None` here.
+    ///
+    /// On both, `validation` carries the limit that blocked it, and `None`
+    /// is still the right thing reported: there is no machine id here worth
+    /// handing back for manual cleanup, whether or not the rollback delete
+    /// actually landed. An adopted machine is never rolled back, so
+    /// `reused == true` implies `Some`.
     pub machine: Option<crate::models::machine::MachineResource>,
     /// The validation performed after activation. Its
     /// [`crate::models::validation::ValidationMeta::code`] is what tells a

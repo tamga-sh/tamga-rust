@@ -71,8 +71,10 @@
 //!
 //! Modelled here but not fully live server-side today:
 //!
-//! - Only 16 of the 24 [`models::validation::ValidationCode`] variants are
-//!   reachable; the rest are declared for forward-compatibility.
+//! - Only 19 of the 24 [`models::validation::ValidationCode`] variants are
+//!   reachable; `NOT_FOUND`, `BANNED`, `COMPONENTS_SCOPE_MISMATCH`,
+//!   `CHECKSUM_SCOPE_MISMATCH` and `VERSION_SCOPE_MISMATCH` are declared for
+//!   forward-compatibility.
 //! - [`models::validation::ScopeObject`]'s `version` and `checksum` fields
 //!   are refused by the server (`422 SCOPE_NOT_SUPPORTED` fails the whole
 //!   validate call), so this crate never sends them. Its other six fields,

@@ -44,8 +44,10 @@ pub fn verify(
 /// sixteen-character string. Because it is a pure function of the key, a client
 /// holding any public key can compute the id the file would name, which is what
 /// makes key rotation solvable offline: fetch or embed the key set, compute
-/// each id, and pick the one the file's `kid` claim names. See
-/// [`crate::checkout::key_set::SigningKeySet`].
+/// each id, and try every held key against the signature before trusting
+/// any of it — the file's `kid` claim no longer picks which key to verify
+/// against, it only labels which key was expected once none of them verify.
+/// See [`crate::checkout::key_set::SigningKeySet`].
 ///
 /// ⚠️ **The hash is over the base64 STRING, not the 32 decoded key bytes.**
 /// The server stores and publishes the Ed25519 public half as standard base64
@@ -54,10 +56,12 @@ pub fn verify(
 /// different, wrong id — the same class of gotcha as the signature covering
 /// `enc`'s base64 string rather than its decoded bytes.
 ///
-/// Passing the empty string is not an error and is worth knowing about: an
-/// account whose `ed25519_public_key` column was never backfilled makes the
-/// server emit `key_id("")` — the constant `e3b0c44298fc1c14` — as the `kid` of
-/// every file it signs.
+/// Passing the empty string is not an error and is worth knowing about: a
+/// pre-patch server signed every file of an account whose
+/// `ed25519_public_key` column was never backfilled with `key_id("")` — the
+/// constant `e3b0c44298fc1c14`. The API patch's startup sweep backfills every
+/// account and repairs the public half, so only files issued before it carry
+/// that `kid`.
 pub fn key_id(ed25519_public_key_base64: &str) -> String {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(ed25519_public_key_base64.as_bytes());

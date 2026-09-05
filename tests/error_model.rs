@@ -313,3 +313,60 @@ fn license_resource_json(license_id: uuid::Uuid) -> serde_json::Value {
         }
     })
 }
+
+#[tokio::test]
+async fn signing_key_missing_arrives_as_api_with_its_code_preserved() {
+    // The enum cannot grow on the patch line; this pins the fallback. The
+    // body is `error_body`'s shape: JSON:API `status` as the STRING "422".
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/actions/check-out"
+        )))
+        .respond_with(
+            ResponseTemplate::new(422).set_body_json(error_body("422", "SIGNING_KEY_MISSING")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let err = test_client(&mock_server)
+        .check_out_license_json(license_id, false, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TamgaError::Api(_)), "got {err:?}");
+    assert_eq!(err.code(), Some("SIGNING_KEY_MISSING"));
+}
+
+#[tokio::test]
+async fn a_numeric_status_is_parsed_rather_than_collapsed_to_unknown() {
+    // D18. Written with a JSON *number* on purpose -- the exact wire shape
+    // the API plan specifies for its new 422s. A pre-patch server sends the
+    // string "422"; `error_body` above covers that form.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/actions/validate"
+        )))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": 422,
+                "code": "SIGNING_KEY_MISSING",
+                "title": "Unprocessable Entity",
+                "detail": "the account has no Ed25519 signing key",
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let err = test_client(&mock_server)
+        .quick_validate(license_id, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("SIGNING_KEY_MISSING"), "got {err:?}");
+    assert_eq!(err.json_api_error().unwrap().status, "422");
+}
