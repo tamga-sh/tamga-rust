@@ -26,10 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = client.validate_by_key(&license_key, None).await?;
 
-    // Only 16 of the 24 modeled ValidationCode variants are reachable
+    // Only 19 of the 24 modeled ValidationCode variants are reachable
     // today — see the enum's own doc comment for the full ✅/⛔ breakdown.
     // The catch-all arm below therefore has to stay: it absorbs both the
-    // 8 unreachable codes and any future server-side addition, which
+    // 5 unreachable codes and any future server-side addition, which
     // deserializes to `ValidationCode::Unknown`.
     match result.meta.code {
         ValidationCode::Valid => {

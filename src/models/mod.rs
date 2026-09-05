@@ -8,7 +8,7 @@
 //!   but no create/update/delete. Mixed casing — `redirectUrl` but `created`.
 //! - [`license`] — `LicenseResource`.
 //! - [`validation`] — `ScopeObject` (8 fields), `ValidationMeta`,
-//!   `ValidationCode` (24 variants, 16 reachable today).
+//!   `ValidationCode` (24 variants, 19 reachable today).
 //! - [`machine`] — `MachineResource`, `HeartbeatStatus`, `ComponentResource`,
 //!   `ProcessResource`, the `Pid` newtype (wire-format string, not integer).
 //! - [`entitlement`] — `EntitlementResource`.

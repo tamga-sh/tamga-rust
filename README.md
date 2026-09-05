@@ -320,7 +320,7 @@ verified before.
 
 ## Known gaps
 
-- Only 16 of the 24 `ValidationCode` variants are reachable server-side today;
+- Only 19 of the 24 `ValidationCode` variants are reachable server-side today;
   all 24 are modelled, with an `Unknown(String)` fallback for future additions
   (`src/models/validation.rs`).
 - `ScopeObject`'s `version` and `checksum` fields are **refused** by the
@@ -353,7 +353,8 @@ verified before.
 - `HeartbeatStatus::Dead` never arrives on a ping, reset or create response. A
   ping writes `last_heartbeat_at = now` and derives the status from that same
   timestamp, so it always answers `Alive` or `Resurrected`; reset and create
-  answer `NotStarted`; and validate never returns `HEARTBEAT_DEAD`. It *does*
+  answer `NotStarted`; and validate returns `HEARTBEAT_DEAD` only for a
+  `scope.fingerprint` match under a `require_heartbeat` policy. It *does*
   arrive anywhere else: the machine embedded in a `.mach` file, the one
   returned by `Client::generate_offline_proof`, the ones from
   `Client::get_machine` and `Client::list_machines` — and the one from

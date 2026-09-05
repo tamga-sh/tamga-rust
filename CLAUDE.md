@@ -108,16 +108,17 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   *must* stay on the retryable-suffix list. Neither ends with `/actions/ping` (that is the process
   ping route), so a suffix list without them silently drops throttled heartbeats until the machine
   is stranded at `DEAD` (and culled outright, on a `require_heartbeat` policy).
-- **Model all 24 `ValidationCode` variants, but only 16 are live.** Reachable: `VALID`,
-  `SUSPENDED`, `EXPIRED`, `OVERDUE`, the four `*_SCOPE_MISMATCH`es for product/policy/user/
-  environment, plus `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`, `TOO_MANY_MACHINES`,
-  `TOO_MANY_CORES`, `TOO_MUCH_MEMORY`, `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES` and `TOO_MANY_USES`.
-  `NOT_FOUND` is declared but never emitted — the handler short-circuits to HTTP 404 instead. The
-  remaining 7 (`BANNED`, `TOO_MANY_USERS`, `HEARTBEAT_DEAD`, `HEARTBEAT_NOT_STARTED`,
-  `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`, `VERSION_SCOPE_MISMATCH`) are wired into
-  the enum for forward-compatibility but never actually returned; the last two are structurally
-  unreachable, since the scope fields that would produce them are refused first. Use
-  `#[serde(other)]` so a future server-side addition doesn't hard-fail deserialization.
+- **Model all 24 `ValidationCode` variants; 19 are live.** Reachable: `VALID`, `SUSPENDED`,
+  `EXPIRED`, `OVERDUE`, the four `*_SCOPE_MISMATCH`es for product/policy/user/environment,
+  `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`, `TOO_MANY_MACHINES`, `TOO_MANY_CORES`,
+  `TOO_MUCH_MEMORY`, `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, `TOO_MANY_USES`, plus — since the API
+  patch — `TOO_MANY_USERS` (every validate endpoint) and `HEARTBEAT_NOT_STARTED`/`HEARTBEAT_DEAD`
+  (a `scope.fingerprint` match under a `require_heartbeat` policy). Unreachable (5): `NOT_FOUND`
+  (the handler short-circuits to HTTP 404), `BANNED` (no banning feature),
+  `COMPONENTS_SCOPE_MISMATCH` (no `scope.components`), `CHECKSUM_SCOPE_MISMATCH` and
+  `VERSION_SCOPE_MISMATCH` (structurally: the scope fields are refused with
+  `422 SCOPE_NOT_SUPPORTED` first). The decoder is a hand-written `Deserialize` with an
+  `Unknown(String)` catch-all — not `#[serde(other)]`, which cannot keep the string.
 - **The five over-limit outcomes have create-time twins.** `POST /machines` runs the
   machine/core/memory/disk checks through the policy's overage strategy: a permissive strategy
   creates the row and defers the limit to validation, a strict one refuses with `422`
@@ -163,9 +164,9 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   `ping-heartbeat` writes `last_heartbeat_at = NOW()` and then computes the status from that same
   timestamp (`heartbeat_status_within`, `machines/model.rs:124-146`), so the age is ~0 and it
   answers `ALIVE`/`RESURRECTED` every time; `reset-heartbeat` nulls the column and answers
-  `NOT_STARTED`; `POST /machines` never sets it and answers `NOT_STARTED`; and `validate` never
-  constructs `HEARTBEAT_DEAD` (zero hits in `validate_license.rs`). **Checkout is the exception and
-  `DEAD` is genuinely reachable there:** `check_out_machine.rs:114` and
+  `NOT_STARTED`; `POST /machines` never sets it and answers `NOT_STARTED`; and `validate` constructs
+  `HEARTBEAT_DEAD` only for a `scope.fingerprint` match under a `require_heartbeat` policy. **Checkout
+  is the exception and `DEAD` is genuinely reachable there:** `check_out_machine.rs:114` and
   `generate_offline_proof.rs:38` both resolve via `queries::find_by_id` — a policy-joined read of a
   row nobody just wrote — then serialize with `MachineResource::from`. In this crate
   `verify_machine_file` returns a `MachineResource`, and `Client::generate_offline_proof` returns

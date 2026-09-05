@@ -14,23 +14,26 @@
 //!   `skip_serializing_if = "Option::is_none"` so unset ones are omitted
 //!   from the request body.
 //! - `ValidationMeta`: `{ ts, valid, detail, code }`.
-//! - `ValidationCode`: all **24** variants, with a `#[serde(other)]
-//!   Unknown(String)` fallback for lenient deserialization of any future
-//!   server-side addition.
-//!   - ✅ Reachable today (16): `VALID`, `SUSPENDED`, `EXPIRED`, `OVERDUE`,
+//! - `ValidationCode`: all **24** variants, decoded by a hand-written
+//!   `Deserialize` impl that maps any unrecognized wire value onto
+//!   `Unknown(String)` instead of failing, so a future server-side addition
+//!   cannot hard-fail deserialization. (Not `#[serde(other)]` — that
+//!   attribute only fits unit variants and would drop the string.)
+//!   - ✅ Reachable (19): `VALID`, `SUSPENDED`, `EXPIRED`, `OVERDUE`,
 //!     `PRODUCT_SCOPE_MISMATCH`, `POLICY_SCOPE_MISMATCH`,
 //!     `USER_SCOPE_MISMATCH`, `ENVIRONMENT_SCOPE_MISMATCH`,
 //!     `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`,
 //!     `TOO_MANY_MACHINES`, `TOO_MANY_CORES`, `TOO_MUCH_MEMORY`,
-//!     `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, `TOO_MANY_USES`.
-//!   - ⛔ `NOT_FOUND` — never emitted; the handler returns HTTP 404 directly
-//!     instead of this code.
-//!   - ⛔ Declared but never wired into any validation path (7): `BANNED`,
-//!     `TOO_MANY_USERS`, `HEARTBEAT_DEAD`, `HEARTBEAT_NOT_STARTED`,
-//!     `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`,
-//!     `VERSION_SCOPE_MISMATCH`. The last two are structurally
-//!     unreachable — the scope fields that would produce them are rejected
-//!     with `422 SCOPE_NOT_SUPPORTED` first.
+//!     `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, `TOO_MANY_USES`,
+//!     `TOO_MANY_USERS` (all three validate endpoints, `users > max_users`),
+//!     `HEARTBEAT_NOT_STARTED` and `HEARTBEAT_DEAD` (both only when
+//!     `scope.fingerprint` is set and the policy has `require_heartbeat`).
+//!   - ⛔ Unreachable (5): `NOT_FOUND` (the handler returns HTTP 404
+//!     instead), `BANNED` (there is no banning feature),
+//!     `COMPONENTS_SCOPE_MISMATCH` (there is no `scope.components`),
+//!     `CHECKSUM_SCOPE_MISMATCH` and `VERSION_SCOPE_MISMATCH` (the scope
+//!     fields that would produce them are refused with
+//!     `422 SCOPE_NOT_SUPPORTED` first).
 
 /// Scope constraints for `validate_by_id`, sent as `meta.scope` in the
 /// request body. Every field is optional — `None` means "no constraint,
@@ -138,16 +141,18 @@ pub struct ValidationMeta {
 /// `Unknown(String)` rather than failing, so a future server-side addition
 /// doesn't hard-break this SDK.
 ///
-/// - ✅ Reachable today (16): `Valid`, `Suspended`, `Expired`, `Overdue`,
+/// - ✅ Reachable (19): `Valid`, `Suspended`, `Expired`, `Overdue`,
 ///   `ProductScopeMismatch`, `PolicyScopeMismatch`, `UserScopeMismatch`,
 ///   `EnvironmentScopeMismatch`, `FingerprintScopeMismatch`,
 ///   `EntitlementsMissing`, `TooManyMachines`, `TooManyCores`,
-///   `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`, `TooManyUses`.
-/// - ⛔ `NotFound` — never emitted; the handler returns HTTP 404 directly.
-/// - ⛔ Declared but never wired into any validation path (7): `Banned`,
-///   `TooManyUsers`, `HeartbeatDead`, `HeartbeatNotStarted`,
-///   `ComponentsScopeMismatch`, `ChecksumScopeMismatch`,
-///   `VersionScopeMismatch`.
+///   `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`, `TooManyUses`,
+///   `TooManyUsers`, `HeartbeatNotStarted`, `HeartbeatDead`.
+/// - ⛔ Unreachable (5): `NotFound` (the handler returns HTTP 404 directly),
+///   `Banned` (there is no banning feature), `ComponentsScopeMismatch`
+///   (there is no `scope.components`), `ChecksumScopeMismatch` and
+///   `VersionScopeMismatch` (structurally unreachable — the scope fields
+///   that would produce them are rejected with `422 SCOPE_NOT_SUPPORTED`
+///   first).
 ///
 /// The five over-limit codes (`TooManyMachines`, `TooManyCores`,
 /// `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`) have create-time
@@ -162,7 +167,7 @@ pub enum ValidationCode {
     Valid,
     /// ⛔ Declared, never emitted — the handler 404s instead.
     NotFound,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ⛔ Declared, never emitted — there is no banning feature.
     Banned,
     /// ✅ `license.suspended == true`.
     Suspended,
@@ -185,11 +190,13 @@ pub enum ValidationCode {
     TooMuchDisk,
     /// ✅ Process count over `policy.max_processes`.
     TooManyProcesses,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ✅ users over policy.max_users, on every validate endpoint.
     TooManyUsers,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ✅ scope.fingerprint matched a machine whose heartbeat is dead, under
+    /// a require_heartbeat policy.
     HeartbeatDead,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ✅ scope.fingerprint matched a machine that has never pinged, under a
+    /// require_heartbeat policy.
     HeartbeatNotStarted,
     /// ✅ `scope.product` set and mismatched.
     ProductScopeMismatch,
@@ -200,7 +207,7 @@ pub enum ValidationCode {
     /// ✅ `scope.fingerprint` set and no machine on this license carries
     /// it.
     FingerprintScopeMismatch,
-    /// ⛔ Declared, not wired into any validation path yet.
+    /// ⛔ Declared, never emitted — there is no scope.components.
     ComponentsScopeMismatch,
     /// ⛔ Structurally unreachable — `scope.checksum` is refused with
     /// `422 SCOPE_NOT_SUPPORTED` before validation runs.
