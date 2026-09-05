@@ -664,3 +664,61 @@ async fn idempotent_activation_reports_a_strict_policy_refusal_with_no_machine()
     assert!(!activation.reused);
     assert!(!activation.validation.meta.valid);
 }
+
+#[tokio::test]
+async fn idempotent_activation_reports_no_machine_after_rolling_back_the_one_it_created() {
+    // D15. After the rollback DELETE the row is gone; returning it as
+    // `machine: Some(..)` names a machine the caller must not act on.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let machine_id = uuid::Uuid::from_u128(6);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/accounts/acc-123/machines"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "data": machine_json(machine_id, "fp-abc123", "NOT_STARTED")
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/actions/validate"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": license_json(license_id),
+            "meta": {
+                "ts": "2026-01-01T00:00:00Z", "valid": false,
+                "detail": "too many machines", "code": "TOO_MANY_MACHINES",
+            },
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("DELETE"))
+        .and(path(format!("/v1/accounts/acc-123/machines/{machine_id}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let activation = test_client(&mock_server)
+        .activate_machine_idempotent(
+            license_id,
+            "fp-abc123",
+            CreateMachineOptions::default(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert!(!activation.reused);
+    assert!(!activation.validation.meta.valid);
+    assert!(
+        activation.machine.is_none(),
+        "the rolled-back machine no longer exists and must not be reported"
+    );
+}
