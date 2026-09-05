@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.4](https://github.com/tamga-sh/tamga-rust/compare/v0.3.3...v0.3.4) - 2026-09-05
+
+### Bug Fixes
+
+- Accept a numeric JSON:API status and default title/detail (a1db939)
+
+- Report no machine once the idempotent activation has rolled it back (dd0fac2)
+
+- Gate the licence-file alg before the signature on every entry point (8de7948)
+
+- Verify against every held key before decoding a byte of enc (cbbe580)
+
+
+### Documentation
+
+- 19 of 24 validation codes are reachable after the API patch (4ebb00f)
+
+- Fix stale kid-selects-the-key and validate-never-Dead claims (09dcdbc)
+
+
+### Testing
+
+- Cover the three newly-reachable validation codes in the wire-mock test (511ce65)
+
+
+
 ## [0.3.3](https://github.com/tamga-sh/tamga-rust/compare/v0.3.2...v0.3.3) - 2026-09-04
 
 ### Miscellaneous
