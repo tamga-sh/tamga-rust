@@ -218,6 +218,12 @@ match verify_license_file_with_key_set(&pem, &keys, Some(license_key)) {
 }
 ```
 
+Every key in the set is tried against the signature before a byte of the file
+is decoded; the `kid` is read afterwards, only to label a failure. So a stale
+set is still `UnknownSigningKey` and a forgery is still `VerificationFailed`
+— and once a signature has verified, `DecryptionFailed` can only mean the
+wrong licence key.
+
 Two constraints worth knowing before you build on this:
 
 - **A raw licence key cannot call `GET /signing-keys`.** It is gated on

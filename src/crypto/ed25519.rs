@@ -54,10 +54,12 @@ pub fn verify(
 /// different, wrong id — the same class of gotcha as the signature covering
 /// `enc`'s base64 string rather than its decoded bytes.
 ///
-/// Passing the empty string is not an error and is worth knowing about: an
-/// account whose `ed25519_public_key` column was never backfilled makes the
-/// server emit `key_id("")` — the constant `e3b0c44298fc1c14` — as the `kid` of
-/// every file it signs.
+/// Passing the empty string is not an error and is worth knowing about: a
+/// pre-patch server signed every file of an account whose
+/// `ed25519_public_key` column was never backfilled with `key_id("")` — the
+/// constant `e3b0c44298fc1c14`. The API patch's startup sweep backfills every
+/// account and repairs the public half, so only files issued before it carry
+/// that `kid`.
 pub fn key_id(ed25519_public_key_base64: &str) -> String {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(ed25519_public_key_base64.as_bytes());

@@ -13,20 +13,27 @@
 //!
 //! # How the `kid` is used, and why that is safe
 //!
-//! The `kid` claim lives *inside* the signed payload but is read *before* the
-//! signature is checked, which is only sound under one rule: it selects a key
-//! from a set the caller already trusts, and never supplies one. A file naming
-//! a `kid` this set does not hold is
-//! [`crate::error::CheckoutError::UnknownSigningKey`]; a file naming one it
-//! does hold is verified against exactly that key and nothing else. There is
-//! deliberately no "try every key" fallback — trying them all would verify the
-//! same set of files while destroying the distinction this module exists for.
+//! Every key the set holds is tried against the signature over `enc`'s
+//! base64 string **before a single byte of `enc` is decoded**, so the only
+//! bytes that reach a decoder, a cipher or the JSON parser on the success
+//! path are bytes a trusted key has already vouched for. The `kid` claim is
+//! read only afterwards, and only when no key verified, to label the
+//! failure: a `kid` the set holds means a forgery
+//! ([`crate::error::CryptoError::VerificationFailed`]); a `kid` it does not
+//! hold means a set that has not caught up with a rotation
+//! ([`crate::error::CheckoutError::UnknownSigningKey`]). The distinction the
+//! set exists for survives because the `kid` still decides the label; what
+//! changed is that a file no longer chooses which key its signature is
+//! checked against, and no unverified ciphertext is decrypted except to read
+//! that one claim. (Until 0.3.3 the `kid` selected the key and the payload
+//! was decoded first — an order tamga-swift, -java, -go and -python never
+//! had; every SDK now shares this one.)
 //!
-//! This is the same discipline JWS `kid` handling needs, and it is why
-//! [`SigningKeySet`] can only be built from keys the caller supplies: from the
-//! account's published key set ([`crate::Client::signing_key_set`]) or from
-//! public keys embedded in the application binary
-//! ([`SigningKeySet::from_public_keys`]).
+//! Trying every key is sound because a [`SigningKeySet`] can only be built
+//! from keys the caller supplies — the account's published key set
+//! ([`crate::Client::signing_key_set`]) or public keys embedded in the
+//! application binary ([`SigningKeySet::from_public_keys`]) — never from
+//! anything the file carries.
 //!
 //! # Ed25519 only
 //!
@@ -133,6 +140,10 @@ impl SigningKeySet {
     /// reports [`crate::error::CheckoutError::UnknownSigningKey`], which is the
     /// honest answer — but it is almost always a sign that the fetch or the
     /// embedded key list is wrong.
+    ///
+    /// Since the API patch every account publishes a key from creation and
+    /// the startup sweep backfills older accounts, so an empty *fetched* set
+    /// is no longer the healthy "never rotated" state it once was.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -141,6 +152,79 @@ impl SigningKeySet {
     /// log line next to an `UnknownSigningKey` failure.
     pub fn kids(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(kid, _)| kid.as_str())
+    }
+
+    /// Every key the set holds, in insertion order. Crate-private: the
+    /// verify-first paths in `license_file`/`machine_file` try each one
+    /// against the signature, and nothing outside needs the raw bytes.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.entries.iter().map(|(_, key)| key)
+    }
+
+    /// Tries every held key against `signature` over `message`, returning
+    /// the first that verifies.
+    ///
+    /// `Err` only for a signature malformed for *every* key
+    /// ([`crate::error::CryptoError::InvalidSignature`]: the wrong length). A
+    /// plain mismatch under every key is `Ok(None)`, which the caller then
+    /// labels through [`SigningKeySet::label_failure`]. An empty set is
+    /// `Ok(None)` too.
+    pub(crate) fn find_verifying_key(
+        &self,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<Option<&[u8; 32]>, crate::error::CryptoError> {
+        for key in self.keys() {
+            match crate::crypto::ed25519::verify(key, message, signature) {
+                Ok(()) => return Ok(Some(key)),
+                Err(crate::error::CryptoError::InvalidSignature) => {
+                    return Err(crate::error::CryptoError::InvalidSignature)
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// Labels a signature that no held key verified, from the `kid` the
+    /// still-unverified payload names.
+    ///
+    /// `probe` is the outcome of decoding — and, when encrypted, decrypting
+    /// — `enc` **only** to read `meta.kid`; nothing else is taken from those
+    /// bytes, and nothing they contain is trusted. The rules:
+    ///
+    /// - the `kid` is held → [`crate::error::CryptoError::VerificationFailed`].
+    ///   The file names a key we have and that key did not sign it: a
+    ///   forgery, or an altered file.
+    /// - the `kid` is not held → [`crate::error::CheckoutError::UnknownSigningKey`].
+    ///   A set that has not caught up with a rotation, not a forgery.
+    /// - the payload cannot be decoded, decrypted or parsed, or names no
+    ///   `kid` → [`crate::error::CryptoError::VerificationFailed`]. With
+    ///   nothing to label it by, the signature failure stands as what it is.
+    /// - the caller supplied no licence key (or, for a machine file, no
+    ///   fingerprint) for an encrypted file →
+    ///   [`crate::error::CheckoutError::LicenseKeyMissing`] /
+    ///   [`crate::error::CheckoutError::FingerprintMissing`], unchanged. A
+    ///   missing argument is the caller's to fix, and hiding it behind a
+    ///   signature verdict would send them chasing keys.
+    pub(crate) fn label_failure(
+        &self,
+        probe: Result<Vec<u8>, crate::error::CheckoutError>,
+    ) -> crate::error::CheckoutError {
+        use crate::error::{CheckoutError, CryptoError};
+
+        let plaintext = match probe {
+            Ok(plaintext) => plaintext,
+            Err(
+                missing @ (CheckoutError::LicenseKeyMissing | CheckoutError::FingerprintMissing),
+            ) => return missing,
+            Err(_) => return CryptoError::VerificationFailed.into(),
+        };
+        match crate::checkout::license_file::probe_kid(&plaintext) {
+            Ok(kid) if self.find(&kid).is_some() => CryptoError::VerificationFailed.into(),
+            Ok(kid) => CheckoutError::UnknownSigningKey { kid },
+            Err(_) => CryptoError::VerificationFailed.into(),
+        }
     }
 }
 

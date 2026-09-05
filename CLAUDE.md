@@ -319,9 +319,13 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   So an ECDSA- or RSA-signed `.mach` file carries a `kid` naming a key that did not sign it, and
   `rotate_ed25519` never touches the account's RSA/ECDSA keys or publishes them. Hence
   `verify_machine_file_with_key_set` takes no `scheme` and refuses anything but `ed25519`;
-  `.lic` files are unaffected, being Ed25519-signed always. Note the `unwrap_or_default()`: an
-  account whose public-key column was never backfilled signs every file with `key_id("")` =
-  `e3b0c44298fc1c14`.
+  `.lic` files are unaffected, being Ed25519-signed always. Note the `unwrap_or_default()`: on
+  a pre-patch server an account whose public-key column was never backfilled signed every file
+  with `key_id("")` = `e3b0c44298fc1c14`; post-patch, every account publishes a key from
+  creation and the sweep repairs the public half, so `GET /signing-keys` is non-empty for every
+  account and only pre-patch files carry that kid. The key-set verifiers try every held key
+  against the signature first and read the `kid` only to label a failure — do not reinstate the
+  kid-selects-the-key order, and do not re-add the "no try-every-key fallback" note it replaced.
 - **A licence key cannot call `GET /signing-keys` either.** Same shape as the `GET /policies/{id}`
   bullet above — `AccountPolicy::can_read` requires `account.read` and `Role::LicenseToken`'s fixed
   permission set (`shared/authz/mod.rs:236-261`) does not include it, so `403` for every raw

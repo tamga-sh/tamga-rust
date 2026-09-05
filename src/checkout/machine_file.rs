@@ -336,9 +336,6 @@ pub fn verify_machine_file_at(
         return Err(crate::error::CheckoutError::SchemeNotSupported);
     }
 
-    use base64::Engine as _;
-    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
-
     let cert = parse_envelope(pem)?;
 
     let (encoding, signing_suffix) = parse_alg(&cert.alg)?;
@@ -355,9 +352,7 @@ pub fn verify_machine_file_at(
     // ⚠️ Same gotcha as license files: signature covers `enc`'s ASCII/UTF-8
     // STRING bytes, never its decoded bytes. Nothing below this point runs
     // until it has passed.
-    let sig_bytes = B64
-        .decode(&cert.sig)
-        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
+    let sig_bytes = decode_signature(&cert)?;
     match scheme {
         LicenseScheme::Ed25519Sign => {
             let pubkey32: [u8; 32] = pubkey
@@ -392,10 +387,14 @@ pub fn verify_machine_file_at(
 /// `kid` claim from a set of keys the caller trusts.
 ///
 /// Same rotation problem, same two distinct outcomes as
-/// [`crate::checkout::license_file::verify_license_file_with_key_set`]: an
-/// unknown `kid` is [`crate::error::CheckoutError::UnknownSigningKey`] (a
-/// stale key set), a known `kid` with a failing signature stays
-/// [`crate::error::CryptoError::VerificationFailed`] (a forgery).
+/// [`crate::checkout::license_file::verify_license_file_with_key_set`]: no
+/// held key verifies and the `kid` is unknown →
+/// [`crate::error::CheckoutError::UnknownSigningKey`] (a stale key set); no
+/// held key verifies and the `kid` is held →
+/// [`crate::error::CryptoError::VerificationFailed`] (a forgery). Every held
+/// key is tried before either half of `enc` is decoded; after a verified
+/// signature, [`crate::error::CryptoError::DecryptionFailed`] can only mean
+/// the wrong licence key or fingerprint.
 ///
 /// **Ed25519-signed machine files only, and that is a server-side limit rather
 /// than a shortcut here.** There is no `scheme` parameter because a key set
@@ -445,7 +444,7 @@ pub fn verify_machine_file_with_key_set_at(
 
     // Not a cross-check against a caller-supplied scheme, as in
     // `verify_machine_file_at`, but a hard restriction: the key set holds
-    // Ed25519 keys and nothing else can be resolved from a `kid`.
+    // Ed25519 keys and nothing else can be tried against the signature.
     let expected_suffix = scheme_alg_suffix(LicenseScheme::Ed25519Sign);
     if signing_suffix != expected_suffix {
         return Err(crate::error::CheckoutError::UnsupportedAlgorithm(format!(
@@ -453,23 +452,28 @@ pub fn verify_machine_file_with_key_set_at(
         )));
     }
 
-    // The `kid` lives inside `enc`, so `enc` is decoded — and, when encrypted,
-    // decrypted under the licence key and fingerprint — before the signature
-    // is checked. Nothing from those bytes is trusted: the `kid` can only
-    // select from keys the caller already supplied, never introduce one.
-    let plaintext = decode_plaintext(&cert, encoding, license_key, fingerprint)?;
-    let kid = crate::checkout::license_file::probe_kid(&plaintext)?;
-    let pubkey = keys
-        .find(&kid)
-        .ok_or(crate::error::CheckoutError::UnknownSigningKey { kid })?;
+    let sig_bytes = decode_signature(&cert)?;
 
+    // ⚠️ Every held key against `enc`'s base64 STRING bytes, before either
+    // half of the payload is decoded — same order as `verify_machine_file_at`.
+    match keys.find_verifying_key(cert.enc.as_bytes(), &sig_bytes)? {
+        Some(_verified_key) => {
+            let plaintext = decode_plaintext(&cert, encoding, license_key, fingerprint)?;
+            finish(&plaintext, now_unix)
+        }
+        // No held key signed this: opened only so the `kid` can label it.
+        None => {
+            Err(keys.label_failure(decode_plaintext(&cert, encoding, license_key, fingerprint)))
+        }
+    }
+}
+
+/// Base64-decodes `sig`. Shared by both entry points.
+fn decode_signature(cert: &CertPayload) -> Result<Vec<u8>, crate::error::CheckoutError> {
     use base64::Engine as _;
-    let sig_bytes = base64::engine::general_purpose::STANDARD
+    base64::engine::general_purpose::STANDARD
         .decode(&cert.sig)
-        .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
-    crate::crypto::ed25519::verify(pubkey, cert.enc.as_bytes(), &sig_bytes)?;
-
-    finish(&plaintext, now_unix)
+        .map_err(|_| crate::error::CheckoutError::InvalidBase64)
 }
 
 /// Strips the PEM markers and parses the inner `{ enc, sig, alg }` JSON.
@@ -813,9 +817,9 @@ mod tests {
 
     #[test]
     fn the_key_set_path_handles_the_dot_separated_encrypted_enc() {
-        // The kid is inside the ciphertext, so both halves of the machine
-        // file's own encrypted layout have to be decoded before a key can be
-        // picked — and both the licence key and the fingerprint are needed.
+        // The signature is checked against every held key before either half
+        // of the dot-separated payload is decoded; both the licence key and
+        // the fingerprint are then needed to open it.
         let (signing, b64) = gen_ed25519();
         let kid = crate::crypto::ed25519::key_id(&b64);
         let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
@@ -845,6 +849,66 @@ mod tests {
                 .unwrap_err(),
             crate::error::CheckoutError::FingerprintMissing
         ));
+    }
+
+    #[test]
+    fn the_machine_key_set_path_verifies_before_it_decrypts() {
+        // Same D16 rule as the licence file, plus the machine file's second
+        // decryption input: after a verified signature, the wrong FINGERPRINT
+        // is the same wrong-key report as the wrong licence key.
+        let (signing, b64) = gen_ed25519();
+        let (_other_signing, other_b64) = gen_ed25519();
+        let kid = crate::crypto::ed25519::key_id(&b64);
+        let license_key = "lic-abc123";
+        let fingerprint = "fp-abc123";
+        let enc_key = crate::crypto::hkdf::derive_machine_file_key(license_key, fingerprint);
+        let pem = build_ed25519_pem_with_kid(&signing, &kid, Some(*enc_key));
+
+        let stale =
+            crate::checkout::key_set::SigningKeySet::from_public_keys([&other_b64]).unwrap();
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(
+                &pem,
+                &stale,
+                Some("wrong-key"),
+                Some(fingerprint),
+                ISSUED_AT
+            )
+            .unwrap_err(),
+            crate::error::CheckoutError::Crypto(crate::error::CryptoError::VerificationFailed)
+        ));
+
+        let held = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(
+                &pem,
+                &held,
+                Some("wrong-key"),
+                Some(fingerprint),
+                ISSUED_AT
+            )
+            .unwrap_err(),
+            crate::error::CheckoutError::Crypto(crate::error::CryptoError::DecryptionFailed)
+        ));
+        assert!(matches!(
+            verify_machine_file_with_key_set_at(
+                &pem,
+                &held,
+                Some(license_key),
+                Some("fp-other"),
+                ISSUED_AT
+            )
+            .unwrap_err(),
+            crate::error::CheckoutError::Crypto(crate::error::CryptoError::DecryptionFailed)
+        ));
+        assert!(verify_machine_file_with_key_set_at(
+            &pem,
+            &held,
+            Some(license_key),
+            Some(fingerprint),
+            ISSUED_AT
+        )
+        .is_ok());
     }
 
     #[test]
