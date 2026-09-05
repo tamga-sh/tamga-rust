@@ -44,8 +44,10 @@ pub fn verify(
 /// sixteen-character string. Because it is a pure function of the key, a client
 /// holding any public key can compute the id the file would name, which is what
 /// makes key rotation solvable offline: fetch or embed the key set, compute
-/// each id, and pick the one the file's `kid` claim names. See
-/// [`crate::checkout::key_set::SigningKeySet`].
+/// each id, and try every held key against the signature before trusting
+/// any of it — the file's `kid` claim no longer picks which key to verify
+/// against, it only labels which key was expected once none of them verify.
+/// See [`crate::checkout::key_set::SigningKeySet`].
 ///
 /// ⚠️ **The hash is over the base64 STRING, not the 32 decoded key bytes.**
 /// The server stores and publishes the Ed25519 public half as standard base64

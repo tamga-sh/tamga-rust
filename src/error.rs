@@ -413,10 +413,11 @@ pub enum CheckoutError {
     /// through a key set: the first calls for refreshing the keys, the second
     /// for refusing the file.
     ///
-    /// Nothing about the file has been trusted at this point. The `kid` is
-    /// read from bytes whose signature has not been checked and is used only
-    /// to select from keys the caller already trusts — it can never introduce
-    /// one.
+    /// Nothing about the file has been trusted at this point. Every key the
+    /// caller holds has already been tried against the signature and none
+    /// verified; the `kid` is then read from those still-unverified bytes
+    /// only to label which failure this is — it never selects a key to
+    /// verify against, and it can never introduce one.
     #[error("no signing key for kid {kid} in the supplied key set")]
     UnknownSigningKey {
         /// The `kid` the file claims, verbatim. Log it next to

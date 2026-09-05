@@ -383,8 +383,9 @@ pub fn verify_machine_file_at(
     finish(&plaintext, now_unix)
 }
 
-/// As [`verify_machine_file`], selecting the public key by the file's own
-/// `kid` claim from a set of keys the caller trusts.
+/// As [`verify_machine_file`], verifying against a set of keys the caller
+/// trusts rather than one, and labelling a failure by the file's own `kid`
+/// claim.
 ///
 /// Same rotation problem, same two distinct outcomes as
 /// [`crate::checkout::license_file::verify_license_file_with_key_set`]: no

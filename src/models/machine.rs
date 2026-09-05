@@ -174,14 +174,15 @@ impl MachineAttributes {
 /// culled, so a machine stays `Dead` **forever** while its row, and the seat
 /// it holds against the licence, are still there.
 ///
-/// ⚠️ **A ping, reset, create or validate response can never say `Dead`.**
-/// Those four are `Dead`-free by construction: `ping-heartbeat` writes
+/// ⚠️ **A ping, reset or create response can never say `Dead`.**
+/// Those three are `Dead`-free by construction: `ping-heartbeat` writes
 /// `last_heartbeat_at = NOW()` and *then* derives the status from that same
 /// timestamp, so its age is ~0 and the answer is always `Alive` or
 /// `Resurrected`; `reset-heartbeat` nulls the column and answers
 /// `NotStarted`; `POST /machines` never sets it and answers `NotStarted`. The
-/// licence `validate` path never constructs
-/// [`crate::models::validation::ValidationCode::HeartbeatDead`] either.
+/// licence `validate` path is not exempt: since the API patch it constructs
+/// [`crate::models::validation::ValidationCode::HeartbeatDead`] for a
+/// `scope.fingerprint` match under a `require_heartbeat` policy.
 ///
 /// ⚠️ **The rule is not "writes cannot say `Dead`" — `PATCH /machines/{id}`
 /// is a write that can.** The durable form is narrower: a response cannot say

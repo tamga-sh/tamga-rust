@@ -1785,8 +1785,15 @@ impl Client {
     /// [`MachineActivation::machine`] is then `None`. So `None` means *no
     /// machine survives this call* on both routes that produce it — the
     /// strict-policy refusal, where nothing was created, and the rollback,
-    /// where what was created is gone. `validation.meta.code` carries the
-    /// limit either way, and there is no machine id worth storing.
+    /// where this call deletes the row it just created. That delete's
+    /// `Result` is discarded (the same swallow this method already uses on
+    /// the create-time rollback path above), so the SDK never confirms the
+    /// rollback DELETE itself succeeded; if that DELETE failed — a network
+    /// error, a `429`, and so on — the row may still exist server-side
+    /// despite `machine: None` being reported. `validation.meta.code`
+    /// carries the limit either way, and there is still no machine id worth
+    /// storing — the caller has nothing to clean up by id even when the
+    /// delete did not land.
     pub async fn activate_machine_idempotent(
         &self,
         license_id: uuid::Uuid,
@@ -2624,10 +2631,17 @@ pub struct MachineActivation {
     /// - the server refused to create it under a strict overage strategy, so
     ///   no row was ever created; or
     /// - this call created it, the validation came back over-limit, and
-    ///   `auto_delete_on_overage` rolled it back, so the row is gone.
+    ///   `auto_delete_on_overage` rolled it back. The rollback DELETE's
+    ///   `Result` is discarded, matching this method's error-handling
+    ///   elsewhere, so the SDK does not confirm that DELETE actually
+    ///   succeeded — in the rare case it failed, the row may still exist
+    ///   server-side even though `machine` is `None` here.
     ///
-    /// On both, `validation` carries the limit that blocked it. An adopted
-    /// machine is never rolled back, so `reused == true` implies `Some`.
+    /// On both, `validation` carries the limit that blocked it, and `None`
+    /// is still the right thing reported: there is no machine id here worth
+    /// handing back for manual cleanup, whether or not the rollback delete
+    /// actually landed. An adopted machine is never rolled back, so
+    /// `reused == true` implies `Some`.
     pub machine: Option<crate::models::machine::MachineResource>,
     /// The validation performed after activation. Its
     /// [`crate::models::validation::ValidationMeta::code`] is what tells a
