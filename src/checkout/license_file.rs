@@ -243,10 +243,13 @@ pub fn verify_license_file_at(
     now_unix: i64,
 ) -> Result<VerifiedLicenseFile, crate::error::CheckoutError> {
     let cert = parse_envelope(pem)?;
-    // Order is deliberate and differs from the key-set path below: nothing is
-    // decoded or decrypted until the signature over `enc` has passed.
+    // The `alg` gate runs before any key or signature work on every entry
+    // point, so a v1 file gets the same answer whichever key it meets.
+    let encoding = validate_alg(&cert.alg)?;
+    // Nothing is decoded or decrypted until the signature over `enc` has
+    // passed.
     verify_signature(ed25519_pubkey, &cert)?;
-    let plaintext = decode_plaintext(&cert, license_key)?;
+    let plaintext = decode_plaintext(&cert, encoding, license_key)?;
     finish(&plaintext, now_unix)
 }
 
@@ -296,7 +299,8 @@ pub fn verify_license_file_with_key_set_at(
     now_unix: i64,
 ) -> Result<VerifiedLicenseFile, crate::error::CheckoutError> {
     let cert = parse_envelope(pem)?;
-    let plaintext = decode_plaintext(&cert, license_key)?;
+    let encoding = validate_alg(&cert.alg)?;
+    let plaintext = decode_plaintext(&cert, encoding, license_key)?;
     let kid = probe_kid(&plaintext)?;
     let pubkey = keys
         .find(&kid)
@@ -341,11 +345,44 @@ fn verify_signature(
     Ok(())
 }
 
-/// Base64-decodes `enc`, decrypting it first when `alg` says it is encrypted.
+/// How `enc` is encoded, as declared by `alg`. Private: the two legal
+/// strings are matched whole and nothing outside this module needs the
+/// distinction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncEncoding {
+    /// `base64+ed25519+v2` — `enc` is base64 of the payload JSON.
+    Plain,
+    /// `aes-256-gcm+ed25519+v2` — `enc` is base64 of `nonce ‖ ciphertext ‖ tag`.
+    Aes256Gcm,
+}
+
+/// The `alg` gate. Runs before any key or signature work on every entry
+/// point, single-key and key-set alike.
 ///
-/// Rejects any `alg` without the `+v2` suffix — there is no v1 fallback.
+/// Exactly two strings are legal, matched whole; a v1 file (no `+v2`) is
+/// [`crate::error::CheckoutError::UnsupportedAlgorithm`] and there is no
+/// fallback — see the module doc for why. Running it first is what makes
+/// the answer entry-point-independent: a v1 file presented with the wrong
+/// key used to report a signature failure through [`verify_license_file`]
+/// and an unsupported algorithm through
+/// [`verify_license_file_with_key_set`] — one file, two diagnoses.
+fn validate_alg(alg: &str) -> Result<EncEncoding, crate::error::CheckoutError> {
+    match alg {
+        "base64+ed25519+v2" => Ok(EncEncoding::Plain),
+        "aes-256-gcm+ed25519+v2" => Ok(EncEncoding::Aes256Gcm),
+        other => Err(crate::error::CheckoutError::UnsupportedAlgorithm(
+            other.to_string(),
+        )),
+    }
+}
+
+/// Base64-decodes `enc`, decrypting it first when `encoding` says so.
+///
+/// `encoding` comes from [`validate_alg`], which every caller has already
+/// run, so no `alg` check happens here.
 fn decode_plaintext(
     cert: &CertPayload,
+    encoding: EncEncoding,
     license_key: Option<&str>,
 ) -> Result<Vec<u8>, crate::error::CheckoutError> {
     use base64::Engine as _;
@@ -355,9 +392,9 @@ fn decode_plaintext(
         .decode(&cert.enc)
         .map_err(|_| crate::error::CheckoutError::InvalidBase64)?;
 
-    match cert.alg.as_str() {
-        "base64+ed25519+v2" => Ok(enc_bytes),
-        "aes-256-gcm+ed25519+v2" => {
+    match encoding {
+        EncEncoding::Plain => Ok(enc_bytes),
+        EncEncoding::Aes256Gcm => {
             let key_str = license_key.ok_or(crate::error::CheckoutError::LicenseKeyMissing)?;
             let key = crate::crypto::hkdf::derive_license_file_key(key_str);
             // nonce(12B) ‖ ciphertext ‖ tag(16B) — at least 28 bytes even
@@ -375,9 +412,6 @@ fn decode_plaintext(
                 ciphertext_and_tag,
             )?)
         }
-        other => Err(crate::error::CheckoutError::UnsupportedAlgorithm(
-            other.to_string(),
-        )),
     }
 }
 
@@ -493,6 +527,19 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(pubkey)
     }
 
+    /// Re-wraps `pem` with a different `alg`, leaving `enc` and `sig` intact.
+    /// `alg` is not covered by the signature, so this is exactly the downgrade
+    /// an attacker can attempt.
+    fn repack_alg(pem: &str, alg: &str) -> String {
+        use base64::Engine as _;
+        let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        let cert_json = B64_TEST.decode(body.trim()).unwrap();
+        let mut cert: serde_json::Value = serde_json::from_slice(&cert_json).unwrap();
+        cert["alg"] = serde_json::json!(alg);
+        let repacked = B64_TEST.encode(serde_json::to_string(&cert).unwrap().as_bytes());
+        format!("{PEM_HEADER}\n{repacked}\n{PEM_FOOTER}")
+    }
+
     fn representative_payload_json() -> String {
         serde_json::json!({
             "data": {
@@ -590,6 +637,23 @@ mod tests {
         let err = verify_license_file(&v1_pem, &pubkey, None).unwrap_err();
         assert!(matches!(
             err,
+            crate::error::CheckoutError::UnsupportedAlgorithm(ref a) if a == "base64+ed25519"
+        ));
+    }
+
+    #[test]
+    fn a_v1_alg_is_refused_before_the_signature_is_even_checked() {
+        // D17. The same file must produce the same error from every entry
+        // point, and the `alg` gate must not depend on holding the right
+        // key: presented with the WRONG key, a v1 file used to report a
+        // signature failure here and UnsupportedAlgorithm through a key set.
+        let (_pubkey, signing_key) = gen_keypair();
+        let (wrong_pubkey, _) = gen_keypair();
+        let pem = build_pem(&representative_payload_json(), &signing_key, None);
+        let v1_pem = repack_alg(&pem, "base64+ed25519");
+
+        assert!(matches!(
+            verify_license_file(&v1_pem, &wrong_pubkey, None).unwrap_err(),
             crate::error::CheckoutError::UnsupportedAlgorithm(ref a) if a == "base64+ed25519"
         ));
     }
@@ -797,9 +861,8 @@ mod tests {
     #[test]
     fn the_key_set_path_refuses_a_v1_file_too() {
         use base64::Engine as _;
-        // The key-set path decodes before it verifies, so a v1 `alg` is caught
-        // by the algorithm check rather than by the signature — but caught it
-        // must still be.
+        // The alg gate runs first on every entry point; the key-set path is
+        // no way round it.
         let (pubkey, signing) = gen_keypair();
         let b64 = pubkey_b64(&pubkey);
         let keys = crate::checkout::key_set::SigningKeySet::from_public_keys([&b64]).unwrap();
