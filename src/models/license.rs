@@ -36,9 +36,6 @@ pub struct LicenseAttributes {
     pub suspended: bool,
     /// Whether checkout/download of this license's key is protected.
     pub protected: bool,
-    /// Current use count, compared against `max_uses` (strict `>=`,
-    /// regardless of overage strategy).
-    pub uses: i32,
     /// Signing scheme for checkout files — see
     /// [`crate::models::policy::LicenseScheme`]. `None` means a legacy
     /// plain/unsigned key.
@@ -51,8 +48,6 @@ pub struct LicenseAttributes {
     pub floating: bool,
     /// Per-license override of `policy.max_machines`, if set.
     pub max_machines: Option<i32>,
-    /// Per-license override of `policy.max_uses`, if set.
-    pub max_uses: Option<i32>,
     /// Per-license override of `policy.max_users`, if set.
     pub max_users: Option<i32>,
     /// Timestamp of the last successful validation, unless suppressed via
@@ -87,13 +82,11 @@ mod tests {
                 "expiry": null,
                 "suspended": false,
                 "protected": false,
-                "uses": 0,
                 "scheme": null,
                 "encrypted": false,
                 "strict": false,
                 "floating": false,
                 "max_machines": null,
-                "max_uses": null,
                 "max_users": null,
                 "last_validated_at": null,
                 "last_check_in_at": null,
@@ -115,7 +108,6 @@ mod tests {
         assert_eq!(resource.attributes.key, Some("lic-abc123".to_string()));
         assert_eq!(resource.attributes.status, "ACTIVE");
         assert!(!resource.attributes.suspended);
-        assert_eq!(resource.attributes.uses, 0);
     }
 
     #[test]

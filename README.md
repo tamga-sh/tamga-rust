@@ -111,6 +111,37 @@ belong to a *different* licence — that conflict is the anti-seat-sharing check
 working, and the `409` propagates unchanged rather than handing back a machine
 this licence does not own.
 
+Entitlements can be a plain boolean grant (`kind: "flag"`) or a named,
+per-license counter with its own cap (`kind: "meter"`) — check `kind` on
+`EntitlementAttributes`/`LicenseEntitlementAttributes` before deciding whether
+`max_value`/`current_value` mean anything for a given row. Meter usage is
+tracked only for entitlements *directly* attached to the license (not merely
+inherited via its policy):
+
+```rust
+use tamga::models::entitlement::EntitlementKind;
+
+let entitlements = client.list_license_entitlements(license_id, None).await?;
+for e in &entitlements {
+    if e.attributes.kind == EntitlementKind::Meter {
+        println!(
+            "{}: {}/{:?}",
+            e.attributes.code, e.attributes.current_value, e.attributes.max_value
+        );
+    }
+}
+
+// Bump a meter's usage by 1 (the default) and read back the fresh count.
+let updated = client
+    .increment_entitlement_usage(license_id, entitlement_id, None)
+    .await?;
+println!("now at {}", updated.attributes.current_value);
+
+// `decrement_entitlement_usage`/`reset_entitlement_usage` are the other two
+// actions in the same family — see `TamgaError::MeterLimitExceeded` for the
+// `422` a caller hits once `current_value` would cross `max_value`.
+```
+
 ## Auth transports
 
 `AuthTransport` covers four of the server's five accepted transports
@@ -326,9 +357,12 @@ verified before.
 
 ## Known gaps
 
-- Only 19 of the 24 `ValidationCode` variants are reachable server-side today;
-  all 24 are modelled, with an `Unknown(String)` fallback for future additions
-  (`src/models/validation.rs`).
+- Only 18 of the 23 `ValidationCode` variants are reachable server-side today;
+  all 23 are modelled, with an `Unknown(String)` fallback for future additions
+  (`src/models/validation.rs`). `TOO_MANY_USES` was removed by the
+  entitlement-metering migration — the global `licenses.uses`/`max_uses`
+  counter it reported on no longer exists; see the per-entitlement meters
+  (`kind`/`max_value`/`current_value`) documented above.
 - `ScopeObject`'s `version` and `checksum` fields are **refused** by the
   server: setting either fails the whole validate call with
   `422 SCOPE_NOT_SUPPORTED` before any check runs, so the SDK never sends

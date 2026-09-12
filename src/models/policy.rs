@@ -9,8 +9,7 @@
 //! - `OverageStrategy`: `NO_OVERAGE`, `ALLOW_1_25X_OVERAGE`,
 //!   `ALLOW_1_5X_OVERAGE`, `ALLOW_2X_OVERAGE`, `ALWAYS_ALLOW_OVERAGE`.
 //!   Multiplies the relevant `max_*` limit before comparing; applies to
-//!   machines/cores/memory/disk/processes — **not** to `uses` (always
-//!   strict `>=` regardless of strategy).
+//!   machines/cores/memory/disk/processes.
 //! - `HeartbeatCullStrategy`: `DEACTIVATE_DEAD` (row deleted), `KEEP_DEAD`
 //!   (row kept).
 //! - `HeartbeatResurrectionStrategy`: `NO_REVIVE`, `1_MINUTE_REVIVE`,
@@ -46,7 +45,7 @@
 //!   created policy's declared default string; treat unrecognized values as
 //!   the "no restriction" variant to match actual server behavior.
 //! - `Policy` full field set: `max_machines`, `max_cores`, `max_memory`,
-//!   `max_disk`, `max_processes`, `max_uses`, `overage_strategy`,
+//!   `max_disk`, `max_processes`, `overage_strategy`,
 //!   `heartbeat_cull_strategy`, `heartbeat_resurrection_strategy`,
 //!   `heartbeat_duration`, `require_check_in`, `check_in_interval`,
 //!   `expiration_strategy`, `renewal_basis`, `authentication_strategy`,
@@ -166,8 +165,7 @@ mod license_scheme_tests {
 /// [`crate::models::validation::ValidationCode`].
 ///
 /// Multiplies the relevant limit before comparing; applies to
-/// machines/cores/memory/disk/processes — **not** to `uses` (server always
-/// enforces strict `count >= max_uses` for uses, regardless of strategy).
+/// machines/cores/memory/disk/processes.
 ///
 /// Deserializes any unrecognized wire value to [`OverageStrategy::NoOverage`]
 /// rather than erroring — this mirrors the server's own fallback behavior
@@ -663,9 +661,6 @@ pub struct PolicyAttributes {
     pub max_machines: Option<i32>,
     /// Total CPU core limit across machines, if set.
     pub max_cores: Option<i32>,
-    /// Use-count limit, if set (compared with strict `>=`, ignoring
-    /// `overage_strategy`).
-    pub max_uses: Option<i32>,
     /// Total process limit across machines, if set.
     pub max_processes: Option<i32>,
     /// Associated-user limit, if set.
@@ -737,7 +732,7 @@ mod policy_tests {
                 "expiration_strategy": "RESTRICT_ACCESS", "expiration_basis": "FROM_CREATION",
                 "renewal_basis": "FROM_EXPIRY", "authentication_strategy": "TOKEN",
                 "overage_strategy": "DENY_ACCESS",
-                "max_machines": null, "max_cores": null, "max_uses": null,
+                "max_machines": null, "max_cores": null,
                 "max_processes": null, "max_users": null, "metadata": {},
                 "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
             }
@@ -762,7 +757,7 @@ mod policy_tests {
                 "expiration_strategy": "RESTRICT_ACCESS", "expiration_basis": "FROM_CREATION",
                 "renewal_basis": "FROM_EXPIRY", "authentication_strategy": "TOKEN",
                 "overage_strategy": "DENY_ACCESS",
-                "max_machines": null, "max_cores": null, "max_uses": null,
+                "max_machines": null, "max_cores": null,
                 "max_processes": null, "max_users": null, "metadata": {},
                 "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
             }

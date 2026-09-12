@@ -304,9 +304,9 @@ fn license_resource_json(license_id: uuid::Uuid) -> serde_json::Value {
         "id": license_id.to_string(),
         "attributes": {
             "name": null, "key": "lic-abc123", "status": "ACTIVE", "expiry": null,
-            "suspended": false, "protected": false, "uses": 0, "scheme": null,
+            "suspended": false, "protected": false, "scheme": null,
             "encrypted": false, "strict": false, "floating": false,
-            "max_machines": 1, "max_uses": null, "max_users": null,
+            "max_machines": 1, "max_users": null,
             "last_validated_at": null, "last_check_in_at": null, "last_check_out_at": null,
             "machines_count": 1, "metadata": {},
             "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",

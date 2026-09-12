@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = client.validate_by_key(&license_key, None).await?;
 
-    // Only 19 of the 24 modeled ValidationCode variants are reachable
+    // Only 18 of the 23 modeled ValidationCode variants are reachable
     // today — see the enum's own doc comment for the full ✅/⛔ breakdown.
     // The catch-all arm below therefore has to stay: it absorbs both the
     // 5 unreachable codes and any future server-side addition, which
@@ -48,7 +48,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 result.meta.code
             );
         }
-        ValidationCode::TooManyUses => println!("❌ license has reached its use limit"),
         other => println!(
             "❌ license is not valid: {other:?} ({})",
             result.meta.detail

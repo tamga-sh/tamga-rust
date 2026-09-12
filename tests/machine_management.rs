@@ -178,9 +178,9 @@ async fn activate_machine_deletes_on_overage_when_requested() {
                 "id": license_id.to_string(),
                 "attributes": {
                     "name": null, "key": "lic-abc123", "status": "ACTIVE", "expiry": null,
-                    "suspended": false, "protected": false, "uses": 0, "scheme": null,
+                    "suspended": false, "protected": false, "scheme": null,
                     "encrypted": false, "strict": false, "floating": false,
-                    "max_machines": 1, "max_uses": null, "max_users": null,
+                    "max_machines": 1, "max_users": null,
                     "last_validated_at": null, "last_check_in_at": null, "last_check_out_at": null,
                     "machines_count": 2, "metadata": {},
                     "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
@@ -228,9 +228,9 @@ fn license_resource_json(license_id: uuid::Uuid, machines_count: u32) -> serde_j
         "id": license_id.to_string(),
         "attributes": {
             "name": null, "key": "lic-abc123", "status": "ACTIVE", "expiry": null,
-            "suspended": false, "protected": false, "uses": 0, "scheme": null,
+            "suspended": false, "protected": false, "scheme": null,
             "encrypted": false, "strict": false, "floating": false,
-            "max_machines": 1, "max_uses": null, "max_users": null,
+            "max_machines": 1, "max_users": null,
             "last_validated_at": null, "last_check_in_at": null, "last_check_out_at": null,
             "machines_count": machines_count, "metadata": {},
             "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",

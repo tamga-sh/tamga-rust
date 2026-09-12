@@ -24,7 +24,7 @@ fn policy_json(id: uuid::Uuid, heartbeat_duration: serde_json::Value) -> serde_j
             "expiration_strategy": "RESTRICT_ACCESS", "expiration_basis": "FROM_CREATION",
             "renewal_basis": "FROM_EXPIRY", "authentication_strategy": "LICENSE",
             "overage_strategy": "DENY_ACCESS",
-            "max_machines": null, "max_cores": null, "max_uses": null,
+            "max_machines": null, "max_cores": null,
             "max_processes": null, "max_users": null, "metadata": {},
             "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
         }
@@ -53,9 +53,9 @@ async fn get_license_returns_the_resource_including_its_plaintext_key() {
                 "id": license_id.to_string(),
                 "attributes": {
                     "name": "Acme", "key": "lic-plaintext", "status": "ACTIVE", "expiry": null,
-                    "suspended": false, "protected": false, "uses": 0, "scheme": null,
+                    "suspended": false, "protected": false, "scheme": null,
                     "encrypted": false, "strict": false, "floating": false,
-                    "max_machines": null, "max_uses": null, "max_users": null,
+                    "max_machines": null, "max_users": null,
                     "last_validated_at": null, "last_check_in_at": null,
                     "last_check_out_at": null, "machines_count": 0, "metadata": {},
                     "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",

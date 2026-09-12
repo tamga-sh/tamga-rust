@@ -108,10 +108,10 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   *must* stay on the retryable-suffix list. Neither ends with `/actions/ping` (that is the process
   ping route), so a suffix list without them silently drops throttled heartbeats until the machine
   is stranded at `DEAD` (and culled outright, on a `require_heartbeat` policy).
-- **Model all 24 `ValidationCode` variants; 19 are live.** Reachable: `VALID`, `SUSPENDED`,
+- **Model all 23 `ValidationCode` variants; 18 are live.** Reachable: `VALID`, `SUSPENDED`,
   `EXPIRED`, `OVERDUE`, the four `*_SCOPE_MISMATCH`es for product/policy/user/environment,
   `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`, `TOO_MANY_MACHINES`, `TOO_MANY_CORES`,
-  `TOO_MUCH_MEMORY`, `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, `TOO_MANY_USES`, plus — since the API
+  `TOO_MUCH_MEMORY`, `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, plus — since the API
   patch — `TOO_MANY_USERS` (every validate endpoint) and `HEARTBEAT_NOT_STARTED`/`HEARTBEAT_DEAD`
   (a `scope.fingerprint` match under a `require_heartbeat` policy). Unreachable (5): `NOT_FOUND`
   (the handler short-circuits to HTTP 404), `BANNED` (no banning feature),
@@ -119,6 +119,17 @@ exposed as `Client::check_for_upgrade` — see the first bullet for the trap in 
   `VERSION_SCOPE_MISMATCH` (structurally: the scope fields are refused with
   `422 SCOPE_NOT_SUPPORTED` first). The decoder is a hand-written `Deserialize` with an
   `Unknown(String)` catch-all — not `#[serde(other)]`, which cannot keep the string.
+  **`TOO_MANY_USES` was removed** by the entitlement-metering migration
+  (2026-09-12): the global `licenses.uses`/`max_uses`/`policies.max_uses`
+  counter it reported on no longer exists on the wire, replaced by named,
+  per-entitlement meters (`kind: "meter"` on `EntitlementAttributes`,
+  `max_value`/`current_value` on `LicenseEntitlementAttributes`, and
+  `Client::increment_entitlement_usage`/`decrement_entitlement_usage`/
+  `reset_entitlement_usage`, refusing with `422 METER_LIMIT_EXCEEDED` —
+  `TamgaError::MeterLimitExceeded`, not folded into `LimitExceededCode` since
+  there is no validate-time twin for a meter cap). This was shipped as a
+  **patch** release by deliberate override — see the release-plz gotcha
+  below and `docs/entitlement-metering-migration.md`.
 - **The five over-limit outcomes have create-time twins.** `POST /machines` runs the
   machine/core/memory/disk checks through the policy's overage strategy: a permissive strategy
   creates the row and defers the limit to validation, a strict one refuses with `422`

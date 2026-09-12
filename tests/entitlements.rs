@@ -3,19 +3,55 @@
 
 use tamga::transport::AuthTransport;
 use tamga::{Client, ClientConfig};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn entitlement_json(id: uuid::Uuid, name: &str, code: &str) -> serde_json::Value {
+    entitlement_json_with_kind(id, name, code, "flag")
+}
+
+fn entitlement_json_with_kind(
+    id: uuid::Uuid,
+    name: &str,
+    code: &str,
+    kind: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "type": "entitlements",
         "id": id.to_string(),
         "attributes": {
             "name": name,
             "code": code,
+            "kind": kind,
             "metadata": {},
             "created": "2026-01-01T00:00:00Z",
             "updated": "2026-01-01T00:00:00Z",
+        }
+    })
+}
+
+fn license_entitlement_json(
+    id: uuid::Uuid,
+    name: &str,
+    code: &str,
+    kind: &str,
+    inherited: bool,
+    max_value: serde_json::Value,
+    current_value: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "entitlements",
+        "id": id.to_string(),
+        "attributes": {
+            "name": name,
+            "code": code,
+            "kind": kind,
+            "metadata": {},
+            "created": "2026-01-01T00:00:00Z",
+            "updated": "2026-01-01T00:00:00Z",
+            "inherited": inherited,
+            "max_value": max_value,
+            "current_value": current_value,
         }
     })
 }
@@ -138,7 +174,7 @@ async fn list_license_entitlements_keeps_the_inherited_flag() {
                     "type": "entitlements",
                     "id": direct_id.to_string(),
                     "attributes": {
-                        "name": "Pro Features", "code": "pro", "metadata": {},
+                        "name": "Pro Features", "code": "pro", "kind": "flag", "metadata": {},
                         "created": "2026-01-01T00:00:00Z",
                         "updated": "2026-01-01T00:00:00Z",
                         "inherited": false,
@@ -148,7 +184,7 @@ async fn list_license_entitlements_keeps_the_inherited_flag() {
                     "type": "entitlements",
                     "id": inherited_id.to_string(),
                     "attributes": {
-                        "name": "Bundled Support", "code": "support", "metadata": {},
+                        "name": "Bundled Support", "code": "support", "kind": "flag", "metadata": {},
                         "created": "2026-01-01T00:00:00Z",
                         "updated": "2026-01-01T00:00:00Z",
                         "inherited": true,
@@ -280,4 +316,245 @@ async fn both_entitlement_listings_surface_a_server_error_as_a_typed_error() {
         .expect_err("a 403 body is not a listing");
     assert!(matches!(err, tamga::TamgaError::Forbidden(_)));
     assert_eq!(err.code(), Some("FORBIDDEN"));
+}
+
+// ── Entitlement metering: `kind`, `max_value`, `current_value` ────────────
+
+#[tokio::test]
+async fn plain_entitlement_listing_carries_kind() {
+    // Account-/policy-/release-scoped shape: `kind` only, no
+    // `max_value`/`current_value`/`inherited` — those are license-scoped.
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [entitlement_json_with_kind(entitlement_id, "Requests", "requests", "meter")]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = test_client(&mock_server);
+    let entitlements = client
+        .list_entitlements(license_id, Some(10), None)
+        .await
+        .unwrap();
+    assert_eq!(entitlements.len(), 1);
+    assert_eq!(
+        entitlements[0].attributes.kind,
+        tamga::models::entitlement::EntitlementKind::Meter
+    );
+}
+
+#[tokio::test]
+async fn get_entitlement_carries_kind() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements/{entitlement_id}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": entitlement_json_with_kind(entitlement_id, "Pro Features", "pro", "flag")
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let entitlement = test_client(&mock_server)
+        .get_entitlement(license_id, entitlement_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        entitlement.attributes.kind,
+        tamga::models::entitlement::EntitlementKind::Flag
+    );
+}
+
+#[tokio::test]
+async fn license_scoped_listing_carries_max_value_and_current_value() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [license_entitlement_json(
+                entitlement_id,
+                "Requests",
+                "requests",
+                "meter",
+                false,
+                serde_json::json!(1000),
+                650,
+            )]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let rows = test_client(&mock_server)
+        .list_license_entitlements(license_id, None)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].attributes.kind,
+        tamga::models::entitlement::EntitlementKind::Meter
+    );
+    assert_eq!(rows[0].attributes.max_value, Some(1000));
+    assert_eq!(rows[0].attributes.current_value, 650);
+}
+
+#[tokio::test]
+async fn license_scoped_listing_null_max_value_means_unlimited() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [license_entitlement_json(
+                entitlement_id,
+                "Requests",
+                "requests",
+                "meter",
+                false,
+                serde_json::Value::Null,
+                0,
+            )]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let rows = test_client(&mock_server)
+        .list_license_entitlements(license_id, None)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].attributes.max_value, None);
+    assert_eq!(rows[0].attributes.current_value, 0);
+}
+
+// ── Entitlement metering: increment / decrement / reset ───────────────────
+
+#[tokio::test]
+async fn increment_entitlement_usage_returns_the_updated_license_entitlement() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements/{entitlement_id}/actions/increment"
+        )))
+        .and(body_json(serde_json::json!({ "increment": 3 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": license_entitlement_json(
+                entitlement_id, "Requests", "requests", "meter", false,
+                serde_json::json!(1000), 8,
+            )
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let updated = test_client(&mock_server)
+        .increment_entitlement_usage(license_id, entitlement_id, Some(3))
+        .await
+        .unwrap();
+    assert_eq!(updated.attributes.current_value, 8);
+    assert_eq!(updated.attributes.max_value, Some(1000));
+}
+
+#[tokio::test]
+async fn decrement_entitlement_usage_returns_the_updated_license_entitlement() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements/{entitlement_id}/actions/decrement"
+        )))
+        .and(body_json(serde_json::json!({ "decrement": 2 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": license_entitlement_json(
+                entitlement_id, "Requests", "requests", "meter", false,
+                serde_json::json!(1000), 3,
+            )
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let updated = test_client(&mock_server)
+        .decrement_entitlement_usage(license_id, entitlement_id, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(updated.attributes.current_value, 3);
+}
+
+#[tokio::test]
+async fn reset_entitlement_usage_sends_no_body_and_returns_zero() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements/{entitlement_id}/actions/reset"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": license_entitlement_json(
+                entitlement_id, "Requests", "requests", "meter", false,
+                serde_json::json!(1000), 0,
+            )
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let updated = test_client(&mock_server)
+        .reset_entitlement_usage(license_id, entitlement_id)
+        .await
+        .unwrap();
+    assert_eq!(updated.attributes.current_value, 0);
+}
+
+#[tokio::test]
+async fn increment_entitlement_usage_surfaces_meter_limit_exceeded() {
+    let mock_server = MockServer::start().await;
+    let license_id = uuid::Uuid::nil();
+    let entitlement_id = uuid::Uuid::nil();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1/accounts/acc-123/licenses/{license_id}/entitlements/{entitlement_id}/actions/increment"
+        )))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "errors": [{
+                "id": "01926b3e-0000-7000-8000-000000000000",
+                "status": "422",
+                "code": "METER_LIMIT_EXCEEDED",
+                "title": "Unprocessable Entity",
+                "detail": "This entitlement has reached its maximum uses",
+                "source": null,
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let err = test_client(&mock_server)
+        .increment_entitlement_usage(license_id, entitlement_id, None)
+        .await
+        .expect_err("the cap must be enforced");
+    assert!(matches!(err, tamga::TamgaError::MeterLimitExceeded(_)));
+    assert_eq!(err.code(), Some("METER_LIMIT_EXCEEDED"));
 }

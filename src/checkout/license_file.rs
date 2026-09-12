@@ -560,9 +560,9 @@ mod tests {
                 "id": "01926b3e-0000-7000-8000-000000000000",
                 "attributes": {
                     "name": "Acme Corp", "key": "lic-abc123", "status": "ACTIVE",
-                    "expiry": null, "suspended": false, "protected": false, "uses": 0,
+                    "expiry": null, "suspended": false, "protected": false,
                     "scheme": null, "encrypted": false, "strict": false, "floating": false,
-                    "max_machines": null, "max_uses": null, "max_users": null,
+                    "max_machines": null, "max_users": null,
                     "last_validated_at": null, "last_check_in_at": null, "last_check_out_at": null,
                     "machines_count": 0, "metadata": {},
                     "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
