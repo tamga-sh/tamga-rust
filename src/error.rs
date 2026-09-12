@@ -31,6 +31,17 @@
 //!   - [`LicenseAuthCode`] — the `401`s the licence-key auth gate produces
 //!     (`LICENSE_SUSPENDED`, `LICENSE_EXPIRED`, `LICENSE_NOT_ALLOWED`).
 //!     None of the three is transient; retrying makes none of them pass.
+//! - `422 METER_LIMIT_EXCEEDED` ([`TamgaError::MeterLimitExceeded`]) —
+//!   [`crate::Client::increment_entitlement_usage`]/
+//!   [`crate::Client::decrement_entitlement_usage`] refuse a write that
+//!   would cross a `kind: "meter"` entitlement's `max_value`. Deliberately
+//!   **not** modeled as a [`LimitExceededCode`] member despite the family
+//!   resemblance: every `LimitExceededCode` is the create-time twin of an
+//!   equivalent [`crate::models::validation::ValidationCode`] the validate
+//!   endpoint can also report, and there is no such twin here — `validate`
+//!   never checks a meter, only the three entitlement actions do. It gets
+//!   its own first-class variant instead, the same way `FINGERPRINT_TAKEN`
+//!   and `PID_TAKEN` do.
 //! - Reach those two via [`TamgaError::limit_exceeded`],
 //!   [`TamgaError::license_auth_failure`], or the raw
 //!   [`TamgaError::code`]/[`TamgaError::json_api_error`] accessors. No new
@@ -149,6 +160,21 @@ pub enum TamgaError {
     /// machine.
     #[error("pid taken: {detail}", detail = .0.detail)]
     PidTaken(Box<JsonApiError>),
+    /// `422 METER_LIMIT_EXCEEDED` — [`crate::Client::increment_entitlement_usage`]
+    /// (or [`crate::Client::decrement_entitlement_usage`], though decrement
+    /// floors at `0` and cannot itself cross a cap upward) refused a write
+    /// that would take a `kind: "meter"` entitlement's `current_value` past
+    /// its `max_value`. Only reachable for an entitlement directly attached
+    /// to the license — see [`crate::models::entitlement::LicenseEntitlementAttributes::inherited`].
+    ///
+    /// Not part of [`LimitExceededCode`] — see this module's doc comment for
+    /// why. [`JsonApiError::meta`] is where a server-supplied
+    /// `entitlement_id` would surface, if a future `tamga-api` build starts
+    /// sending one (verified against `entitlements::service::increment_usage`
+    /// as of this migration: it does not today, so this is read defensively,
+    /// not assumed).
+    #[error("meter limit exceeded: {detail}", detail = .0.detail)]
+    MeterLimitExceeded(Box<JsonApiError>),
     /// A `"v1x0."` offline proof failed to parse or verify — see
     /// [`ProofError`].
     #[error(transparent)]
@@ -450,6 +476,7 @@ impl TamgaError {
             | TamgaError::FingerprintTaken(err)
             | TamgaError::DatasetInvalid(err)
             | TamgaError::PidTaken(err)
+            | TamgaError::MeterLimitExceeded(err)
             | TamgaError::NotFound(err)
             | TamgaError::Unauthorized(err)
             | TamgaError::Forbidden(err)
@@ -485,6 +512,26 @@ impl TamgaError {
         self.code().and_then(LicenseAuthCode::parse)
     }
 
+    /// The `meta.entitlement_id` on a [`TamgaError::MeterLimitExceeded`], if
+    /// the server sent one.
+    ///
+    /// Read defensively, not assumed: as of this migration `tamga-api`'s
+    /// `entitlements::service::increment_usage`/`decrement_usage` pass no
+    /// `meta` at all on this error, so this returns `None` against a
+    /// current server. It costs nothing to read the field anyway — a future
+    /// server build that starts sending `entitlement_id` (matching the
+    /// entitlement-metering spec) is then already handled without another
+    /// SDK release, and the caller already has the entitlement id from its
+    /// own call in the meantime.
+    pub fn meter_limit_entitlement_id(&self) -> Option<uuid::Uuid> {
+        self.json_api_error()?
+            .meta
+            .as_ref()?
+            .get("entitlement_id")?
+            .as_str()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    }
+
     /// Maps a parsed [`JsonApiError`] to its most specific [`TamgaError`]
     /// variant, falling back to the generic [`TamgaError::Api`] for any
     /// `code` without a dedicated variant. Single dispatch point: a newly
@@ -504,6 +551,7 @@ impl TamgaError {
             "LICENSE_KEY_MISSING" => TamgaError::LicenseKeyMissingApi(Box::new(err)),
             "FINGERPRINT_TAKEN" => TamgaError::FingerprintTaken(Box::new(err)),
             "PID_TAKEN" => TamgaError::PidTaken(Box::new(err)),
+            "METER_LIMIT_EXCEEDED" => TamgaError::MeterLimitExceeded(Box::new(err)),
             "NOT_FOUND" => TamgaError::NotFound(Box::new(err)),
             "UNAUTHORIZED" => TamgaError::Unauthorized(Box::new(err)),
             "FORBIDDEN" => TamgaError::Forbidden(Box::new(err)),
@@ -553,6 +601,15 @@ pub struct JsonApiError {
     /// Present for validation errors (`422`) — points at the offending
     /// request body field via a JSON Pointer.
     pub source: Option<JsonApiErrorSource>,
+    /// Arbitrary machine-readable metadata some error codes carry, e.g.
+    /// `meta.entitlement_id` on a hypothetical future
+    /// `422 METER_LIMIT_EXCEEDED` (`tamga-api` does not send one as of this
+    /// migration — see [`TamgaError::MeterLimitExceeded`]). Kept as a raw
+    /// [`serde_json::Value`] because each error code that carries one
+    /// defines its own shape; match on `code` first, then read the field(s)
+    /// that code documents. `None` when the server sent no `meta` key.
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// `status` as either JSON representation. A plain `String` field refuses
@@ -751,6 +808,7 @@ mod tests {
             title: "Unprocessable Entity".to_string(),
             detail: "this license's policy does not require check-in".to_string(),
             source: None,
+            meta: None,
         };
         let mapped = TamgaError::from_json_api_error(err);
         assert!(matches!(mapped, TamgaError::CheckInNotRequired(_)));
@@ -769,6 +827,7 @@ mod tests {
             title: "Unprocessable Entity".to_string(),
             detail: "scope.version is not supported".to_string(),
             source: None,
+            meta: None,
         };
         let mapped = TamgaError::from_json_api_error(err);
         assert!(matches!(mapped, TamgaError::Api(_)));
@@ -827,6 +886,7 @@ mod tests {
             title: String::new(),
             detail: String::new(),
             source: None,
+            meta: None,
         })
     }
 
@@ -870,6 +930,45 @@ mod tests {
     }
 
     #[test]
+    fn meter_limit_exceeded_maps_to_its_own_dedicated_variant() {
+        // Deliberately NOT a `LimitExceededCode` member — see the module doc
+        // comment and `TamgaError::MeterLimitExceeded`'s own doc comment for
+        // why: there is no validate-time twin for a meter cap the way there
+        // is for machines/cores/memory/disk/processes.
+        let err = error_with_code("422", "METER_LIMIT_EXCEEDED");
+        assert!(matches!(err, TamgaError::MeterLimitExceeded(_)));
+        assert_eq!(err.code(), Some("METER_LIMIT_EXCEEDED"));
+        assert_eq!(
+            err.limit_exceeded(),
+            None,
+            "METER_LIMIT_EXCEEDED must not be classified as a LimitExceededCode"
+        );
+    }
+
+    #[test]
+    fn meter_limit_entitlement_id_reads_meta_when_present() {
+        let err = TamgaError::from_json_api_error(JsonApiError {
+            id: "01926b3e-0000-7000-8000-000000000000".to_string(),
+            status: "422".to_string(),
+            code: "METER_LIMIT_EXCEEDED".to_string(),
+            title: "Unprocessable Entity".to_string(),
+            detail: "This entitlement has reached its maximum uses".to_string(),
+            source: None,
+            meta: Some(serde_json::json!({ "entitlement_id": uuid::Uuid::nil().to_string() })),
+        });
+        assert_eq!(err.meter_limit_entitlement_id(), Some(uuid::Uuid::nil()));
+    }
+
+    #[test]
+    fn meter_limit_entitlement_id_is_none_against_the_current_server_shape() {
+        // `tamga-api`'s `entitlements::service::increment_usage`/
+        // `decrement_usage` pass `None` for `meta` as of this migration —
+        // this must degrade to `None`, not panic or error.
+        let err = error_with_code("422", "METER_LIMIT_EXCEEDED");
+        assert_eq!(err.meter_limit_entitlement_id(), None);
+    }
+
+    #[test]
     fn license_auth_gate_codes_classify() {
         let cases = [
             ("LICENSE_SUSPENDED", LicenseAuthCode::LicenseSuspended),
@@ -908,6 +1007,7 @@ mod tests {
             "DATASET_INVALID",
             "TTL_INVALID",
             "SCHEME_NOT_SUPPORTED",
+            "METER_LIMIT_EXCEEDED",
             // No dedicated variant — falls back to `Api`, which carries the
             // body just the same. This is the route every un-typed code
             // takes, including `SCOPE_NOT_SUPPORTED`.
@@ -952,6 +1052,7 @@ mod tests {
             title: "".to_string(),
             detail: "".to_string(),
             source: None,
+            meta: None,
         };
         assert!(matches!(
             TamgaError::from_json_api_error(build("NOT_FOUND")),

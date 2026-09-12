@@ -8,10 +8,12 @@
 //!   but no create/update/delete. Mixed casing — `redirectUrl` but `created`.
 //! - [`license`] — `LicenseResource`.
 //! - [`validation`] — `ScopeObject` (8 fields), `ValidationMeta`,
-//!   `ValidationCode` (24 variants, 19 reachable today).
+//!   `ValidationCode` (23 variants, 18 reachable today).
 //! - [`machine`] — `MachineResource`, `HeartbeatStatus`, `ComponentResource`,
 //!   `ProcessResource`, the `Pid` newtype (wire-format string, not integer).
-//! - [`entitlement`] — `EntitlementResource`.
+//! - [`entitlement`] — `EntitlementResource`, `EntitlementKind`
+//!   (`Flag`/`Meter`), and the licence-scoped `LicenseEntitlement` (adds
+//!   `inherited`, `max_value`, `current_value`).
 //! - [`policy`] — `Policy`, `OverageStrategy`, `HeartbeatCullStrategy`,
 //!   `HeartbeatResurrectionStrategy`, `LicenseScheme`, and the free-text
 //!   (open-string) policy fields (`expiration_strategy`, `renewal_basis`,

@@ -33,7 +33,10 @@
 //!   [`Client::delete_process`], [`Client::delete_machine_processes`].
 //! - Entitlements: [`Client::list_entitlements`],
 //!   [`Client::list_license_entitlements`], [`Client::get_entitlement`],
-//!   [`Client::has_entitlement`].
+//!   [`Client::has_entitlement`], plus the meter actions
+//!   [`Client::increment_entitlement_usage`],
+//!   [`Client::decrement_entitlement_usage`],
+//!   [`Client::reset_entitlement_usage`].
 //! - Licence and policy reads: [`Client::get_license`],
 //!   [`Client::get_license_policy`], [`Client::get_policy`], and the
 //!   heartbeat sizing they enable —
@@ -610,6 +613,7 @@ impl Client {
                         title: "Unknown Error".to_string(),
                         detail: "server returned an empty errors array".to_string(),
                         source: None,
+                        meta: None,
                     })
             }
             Err(_) => crate::error::JsonApiError {
@@ -619,6 +623,7 @@ impl Client {
                 title: "Unknown Error".to_string(),
                 detail: format!("server returned {status} with a non-JSON:API body"),
                 source: None,
+                meta: None,
             },
         };
         crate::TamgaError::from_json_api_error(json_api_error)
@@ -1382,6 +1387,90 @@ impl Client {
         self.send_json_api(
             reqwest::Method::GET,
             &format!("/licenses/{license_id}/entitlements/{entitlement_id}"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// `POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/increment`
+    /// — bumps a `kind: "meter"` entitlement's `current_value` by
+    /// `increment` (server default/minimum `1`; a `None`/`0`/negative value
+    /// is raised to `1` server-side, never rejected). Returns the full
+    /// updated [`crate::models::entitlement::LicenseEntitlement`] resource,
+    /// mirroring [`Self::ping_heartbeat`]'s shape — the caller sees the
+    /// fresh `current_value` (and `max_value`) without a second round trip.
+    ///
+    /// **Requires the entitlement to be directly attached to this
+    /// license** — an entitlement only held through the license's policy
+    /// has no `license_entitlements` row to increment and this 404s. Attach
+    /// it directly first.
+    ///
+    /// Refuses with [`crate::TamgaError::MeterLimitExceeded`]
+    /// (`422 METER_LIMIT_EXCEEDED`) when `current_value + increment` would
+    /// exceed `max_value`. Not retried automatically on `429` — unlike
+    /// [`Self::ping_heartbeat`], incrementing is not idempotent, so a
+    /// blind retry risks double-counting a use the first attempt already
+    /// recorded.
+    pub async fn increment_entitlement_usage(
+        &self,
+        license_id: uuid::Uuid,
+        entitlement_id: uuid::Uuid,
+        increment: Option<i64>,
+    ) -> Result<crate::models::entitlement::LicenseEntitlement, crate::TamgaError> {
+        let body = increment.map(|increment| serde_json::json!({ "increment": increment }));
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/licenses/{license_id}/entitlements/{entitlement_id}/actions/increment"),
+            body,
+            None,
+        )
+        .await
+    }
+
+    /// `POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/decrement`
+    /// — lowers a `kind: "meter"` entitlement's `current_value` by
+    /// `decrement` (server default/minimum `1`, same clamping rule as
+    /// [`Self::increment_entitlement_usage`]). `current_value` floors at
+    /// `0` server-side; it never goes negative. Returns the full updated
+    /// [`crate::models::entitlement::LicenseEntitlement`] resource.
+    ///
+    /// Same direct-attachment requirement as
+    /// [`Self::increment_entitlement_usage`]: 404s for a policy-only
+    /// inherited entitlement.
+    pub async fn decrement_entitlement_usage(
+        &self,
+        license_id: uuid::Uuid,
+        entitlement_id: uuid::Uuid,
+        decrement: Option<i64>,
+    ) -> Result<crate::models::entitlement::LicenseEntitlement, crate::TamgaError> {
+        let body = decrement.map(|decrement| serde_json::json!({ "decrement": decrement }));
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/licenses/{license_id}/entitlements/{entitlement_id}/actions/decrement"),
+            body,
+            None,
+        )
+        .await
+    }
+
+    /// `POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/reset`
+    /// — no body, sets a `kind: "meter"` entitlement's `current_value` back
+    /// to `0`. Returns the full updated
+    /// [`crate::models::entitlement::LicenseEntitlement`] resource, same
+    /// shape as [`Self::increment_entitlement_usage`]/
+    /// [`Self::decrement_entitlement_usage`].
+    ///
+    /// Same direct-attachment requirement as the other two meter actions:
+    /// 404s for a policy-only inherited entitlement.
+    pub async fn reset_entitlement_usage(
+        &self,
+        license_id: uuid::Uuid,
+        entitlement_id: uuid::Uuid,
+    ) -> Result<crate::models::entitlement::LicenseEntitlement, crate::TamgaError> {
+        self.send_json_api(
+            reqwest::Method::POST,
+            &format!("/licenses/{license_id}/entitlements/{entitlement_id}/actions/reset"),
             None,
             None,
         )
