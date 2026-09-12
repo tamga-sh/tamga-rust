@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5](https://github.com/tamga-sh/tamga-rust/compare/v0.3.4...v0.3.5) - 2026-09-12
+
+### Bug Fixes
+
+- Propagate entitlement-metering migration (kind, meter usage, METER_LIMIT_EXCEEDED) ([#51](https://github.com/tamga-sh/tamga-rust/pull/51)) (d7ac491)
+
+
 ## [0.3.4](https://github.com/tamga-sh/tamga-rust/compare/v0.3.3...v0.3.4) - 2026-09-05
 
 ### Bug Fixes
