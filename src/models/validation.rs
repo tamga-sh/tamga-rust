@@ -14,20 +14,24 @@
 //!   `skip_serializing_if = "Option::is_none"` so unset ones are omitted
 //!   from the request body.
 //! - `ValidationMeta`: `{ ts, valid, detail, code }`.
-//! - `ValidationCode`: all **24** variants, decoded by a hand-written
+//! - `ValidationCode`: all **23** variants, decoded by a hand-written
 //!   `Deserialize` impl that maps any unrecognized wire value onto
 //!   `Unknown(String)` instead of failing, so a future server-side addition
 //!   cannot hard-fail deserialization. (Not `#[serde(other)]` — that
 //!   attribute only fits unit variants and would drop the string.)
-//!   - ✅ Reachable (19): `VALID`, `SUSPENDED`, `EXPIRED`, `OVERDUE`,
+//!   - ✅ Reachable (18): `VALID`, `SUSPENDED`, `EXPIRED`, `OVERDUE`,
 //!     `PRODUCT_SCOPE_MISMATCH`, `POLICY_SCOPE_MISMATCH`,
 //!     `USER_SCOPE_MISMATCH`, `ENVIRONMENT_SCOPE_MISMATCH`,
 //!     `FINGERPRINT_SCOPE_MISMATCH`, `ENTITLEMENTS_MISSING`,
 //!     `TOO_MANY_MACHINES`, `TOO_MANY_CORES`, `TOO_MUCH_MEMORY`,
-//!     `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`, `TOO_MANY_USES`,
+//!     `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`,
 //!     `TOO_MANY_USERS` (all three validate endpoints, `users > max_users`),
 //!     `HEARTBEAT_NOT_STARTED` and `HEARTBEAT_DEAD` (both only when
 //!     `scope.fingerprint` is set and the policy has `require_heartbeat`).
+//!     `TOO_MANY_USES` was removed entirely — the retired global
+//!     `licenses.uses`/`max_uses` counter it reported on no longer exists;
+//!     see [`crate::models::entitlement::EntitlementKind::Meter`] for its
+//!     replacement.
 //!   - ⛔ Unreachable (5): `NOT_FOUND` (the handler returns HTTP 404
 //!     instead), `BANNED` (there is no banning feature),
 //!     `COMPONENTS_SCOPE_MISMATCH` (there is no `scope.components`),
@@ -136,16 +140,16 @@ pub struct ValidationMeta {
     pub code: ValidationCode,
 }
 
-/// All 24 server-declared validation codes, evaluated in priority order for
+/// All 23 server-declared validation codes, evaluated in priority order for
 /// the by-ID endpoint. Deserializes any unrecognized wire value into
 /// `Unknown(String)` rather than failing, so a future server-side addition
 /// doesn't hard-break this SDK.
 ///
-/// - ✅ Reachable (19): `Valid`, `Suspended`, `Expired`, `Overdue`,
+/// - ✅ Reachable (18): `Valid`, `Suspended`, `Expired`, `Overdue`,
 ///   `ProductScopeMismatch`, `PolicyScopeMismatch`, `UserScopeMismatch`,
 ///   `EnvironmentScopeMismatch`, `FingerprintScopeMismatch`,
 ///   `EntitlementsMissing`, `TooManyMachines`, `TooManyCores`,
-///   `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`, `TooManyUses`,
+///   `TooMuchMemory`, `TooMuchDisk`, `TooManyProcesses`,
 ///   `TooManyUsers`, `HeartbeatNotStarted`, `HeartbeatDead`.
 /// - ⛔ Unreachable (5): `NotFound` (the handler returns HTTP 404 directly),
 ///   `Banned` (there is no banning feature), `ComponentsScopeMismatch`
@@ -217,8 +221,6 @@ pub enum ValidationCode {
     VersionScopeMismatch,
     /// ✅ `scope.environment` set and mismatched.
     EnvironmentScopeMismatch,
-    /// ✅ `uses >= max_uses`, strict `>=` regardless of overage strategy.
-    TooManyUses,
     /// Any wire value not matching a known variant above — lenient
     /// deserialization for forward-compatibility with future server codes.
     Unknown(String),
@@ -254,7 +256,6 @@ impl<'de> serde::Deserialize<'de> for ValidationCode {
             "CHECKSUM_SCOPE_MISMATCH" => ValidationCode::ChecksumScopeMismatch,
             "VERSION_SCOPE_MISMATCH" => ValidationCode::VersionScopeMismatch,
             "ENVIRONMENT_SCOPE_MISMATCH" => ValidationCode::EnvironmentScopeMismatch,
-            "TOO_MANY_USES" => ValidationCode::TooManyUses,
             other => ValidationCode::Unknown(other.to_string()),
         })
     }
@@ -307,14 +308,13 @@ mod tests {
                 "ENVIRONMENT_SCOPE_MISMATCH",
                 ValidationCode::EnvironmentScopeMismatch,
             ),
-            ("TOO_MANY_USES", ValidationCode::TooManyUses),
         ]
     }
 
     #[test]
-    fn deserializes_all_24_known_wire_strings() {
+    fn deserializes_all_23_known_wire_strings() {
         let pairs = all_known_wire_pairs();
-        assert_eq!(pairs.len(), 24, "must cover all 24 server-declared codes");
+        assert_eq!(pairs.len(), 23, "must cover all 23 server-declared codes");
         for (wire, expected) in pairs {
             let json = format!("\"{wire}\"");
             let parsed: ValidationCode = serde_json::from_str(&json).unwrap();
@@ -329,6 +329,16 @@ mod tests {
             parsed,
             ValidationCode::Unknown("SOME_FUTURE_CODE".to_string())
         );
+    }
+
+    #[test]
+    fn too_many_uses_is_retired_and_falls_back_to_unknown() {
+        // The retired global `licenses.uses`/`max_uses` counter this code
+        // used to report on no longer exists on the wire — `validate` never
+        // emits it again. A server that somehow still sent it (a pre-patch
+        // build) must not hard-fail this SDK.
+        let parsed: ValidationCode = serde_json::from_str("\"TOO_MANY_USES\"").unwrap();
+        assert_eq!(parsed, ValidationCode::Unknown("TOO_MANY_USES".to_string()));
     }
 
     #[test]

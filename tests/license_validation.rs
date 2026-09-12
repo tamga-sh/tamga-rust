@@ -17,13 +17,11 @@ fn license_resource_json(id: uuid::Uuid) -> serde_json::Value {
             "expiry": null,
             "suspended": false,
             "protected": false,
-            "uses": 0,
             "scheme": null,
             "encrypted": false,
             "strict": false,
             "floating": false,
             "max_machines": null,
-            "max_uses": null,
             "max_users": null,
             "last_validated_at": null,
             "last_check_in_at": null,
@@ -166,14 +164,13 @@ async fn each_reachable_validation_code_deserializes_from_a_mocked_response() {
         ("TOO_MUCH_MEMORY", VC::TooMuchMemory),
         ("TOO_MUCH_DISK", VC::TooMuchDisk),
         ("TOO_MANY_PROCESSES", VC::TooManyProcesses),
-        ("TOO_MANY_USES", VC::TooManyUses),
         // All three became reachable via the API patch that made `validate`
         // enforce `users > max_users` and `require_heartbeat`; the list missed them.
         ("TOO_MANY_USERS", VC::TooManyUsers),
         ("HEARTBEAT_NOT_STARTED", VC::HeartbeatNotStarted),
         ("HEARTBEAT_DEAD", VC::HeartbeatDead),
     ];
-    assert_eq!(reachable.len(), 19, "must cover all 19 reachable codes");
+    assert_eq!(reachable.len(), 18, "must cover all 18 reachable codes");
 
     for (wire, expected) in reachable {
         let mock_server = MockServer::start().await;
