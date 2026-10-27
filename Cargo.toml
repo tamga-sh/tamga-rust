@@ -68,3 +68,9 @@ insta = { version = "1", features = ["json"] }
 # Test-only: generating fresh Ed25519 keypairs for crypto unit tests
 # (production code only ever verifies, never generates, keys).
 rand = "0.8"
+
+# macOS: incremental caches and unpacked split-debuginfo grew target/ to hundreds of GB
+# (one dep-graph per test binary, ~400k loose .o files, each slowing every process launch).
+[profile.dev]
+incremental = false
+split-debuginfo = "off"
