@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6](https://github.com/tamga-sh/tamga-rust/compare/v0.3.5...v0.3.6) - 2026-10-29
+
+### Miscellaneous
+
+- Keep dev builds from filling target/ (incremental off, split-debuginfo off) ([#59](https://github.com/tamga-sh/tamga-rust/pull/59)) (eeb32df)
+
+
+
 ## [0.3.5](https://github.com/tamga-sh/tamga-rust/compare/v0.3.4...v0.3.5) - 2026-09-12
 
 ### Bug Fixes
